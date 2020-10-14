@@ -27,6 +27,22 @@ def surjective_map(subject, domain, target):
     return ''.join(buf)
 
 
+def surjective_punct_replace(subject, target):
+	"""
+	Maps all punctuation characters in `subject` to the
+	given target string.
+	"""
+	return surjective_map(subject, STR_EXTRANEOUS, target)
+
+
+def surject_punct_remove(subject):
+	"""
+	Maps all punctuation characters in `subject` to 
+	space characters.
+	"""
+	return surjective_map(subject, STR_EXTRANEOUS, ' ')
+
+
 def wordify_wordlist(subject, uppercase=False):
 	"""
 	Takes the `subject` string, transforms all of the letters into
