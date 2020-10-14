@@ -35,7 +35,7 @@ def surjective_punct_replace(subject, target):
 	return surjective_map(subject, STR_EXTRANEOUS, target)
 
 
-def surject_punct_remove(subject):
+def surjective_punct_remove(subject):
 	"""
 	Maps all punctuation characters in `subject` to 
 	space characters.
