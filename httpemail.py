@@ -6,37 +6,9 @@ import sys
 from pathlib import Path
 from collections import Counter
 from html.parser import HTMLParser
-import string
-import re
 
-
-# # We remove '-' character because it is commonly used to
-# # conjugate words.
-# STR_EXTRANEOUS = (string.punctuation + string.digits + "\t\r\n").replace('-', '')
-STR_EXTRANEOUS = string.punctuation + string.digits + "\t\r\n"
-
-
-def surjective_map(subject, domain, target):
-    """
-    Maps all characters in the |domain| string to
-    a single character |target|, hence a surjective
-    mapping, of the |subject| string.
-
-    ex. subject = '{a,b,c}!'
-        domain = string.punctuation
-        target = '.'
-
-        returns '.a.b.c..'
-
-    I couldn't find anything in the python standard
-    library that does exactly this, but I may be missing
-    something ¯\_(ツ)_/¯ (btw regex is about 4x slower)
-    """
-    buf = list(subject)
-    for i, c in enumerate(buf):
-        if c in domain:
-            buf[i] = target
-    return ''.join(buf)
+from .strutil import STR_EXTRANEOUS
+from .strutil import surjective_map
 
 
 class ConcatParser(HTMLParser):
