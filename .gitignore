@@ -1,0 +1,5 @@
+# python/environment related ignores
+__pycache__
+venv
+
+# other files/personal
