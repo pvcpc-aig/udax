@@ -147,6 +147,44 @@ def s_norm(p_string, uppercase=False):
 	return ' '.join(nopunct.split())
 
 
+def f_open_large_read(path, *args, **kwargs):
+	"""
+	A utility function to open a file handle for reading 
+	with a default 64MB buffer size. The buffer size may 
+	be overriden in the `kwargs`, but there is no point 
+	in doing so as this is meant to be a quick utility.
+
+	:param path
+		A string or pathlike object pointing to a desired
+	"""
+	if "mode" not in kwargs:
+		kwargs["mode"] = "r"
+
+	if "buffering" not in kwargs:
+		kwargs["buffering"] = 2 ** 26
+
+	return open(path, **kwargs)
+
+
+def f_open_large_write(path, *args, **kwargs):
+	"""
+	A utility function to open a file handle for reading 
+	with a default 16MB buffer size. The buffer size may 
+	be overriden in the `kwargs`, but there is no point 
+	in doing so as this is meant to be a quick utility.
+
+	:param path
+		A string or pathlike object pointing to a desired
+	"""
+	if "mode" not in kwargs:
+		kwargs["mode"] = "w"
+
+	if "buffering" not in kwargs:
+		kwargs["buffering"] = 2 ** 24
+
+	return open(path, **kwargs)
+
+
 def f_line_count(path, *args, **kwargs):
 	"""
 	A quick utility function to count the number of lines in
@@ -155,6 +193,9 @@ def f_line_count(path, *args, **kwargs):
 	:param path
 		A string or pathlike object pointing to a file whose
 		lines to count.
+	
+	:return int
+		The number of lines in the given file.
 	"""
 	lines = 0
 	with open(path, **kwargs) as handle:
@@ -175,6 +216,9 @@ def f_line_count_fd(stream, *args, **kwargs):
 
 	:param offset
 		A numeric offset to apply to the resulting line count.
+	
+	:return int
+		The number of lines remaining in the given stream.
 	"""
 	prev = None
 	if stream.seekable():
@@ -199,7 +243,9 @@ def csv_parseln(
 		esc='\\'):
 	"""
 	Given a sample CSV line, this function will parse the line into
-	a list of cells representing that CSV row.
+	a list of cells representing that CSV row. If the given `p_line`
+	contains newline characters, only the content present before
+	the first newline character is parsed.
 
 	:param p_line
 		The string representing the CSV line to parse. This is usually
@@ -216,6 +262,9 @@ def csv_parseln(
 	:param esc
 		The escape character used to escape sensitive characters.
 	
+	:return list
+		The list of cells in the given row line.
+
 	If `p_line` is None, this function does nothing and returns None.
 	
 	If `delim` is None or `quote` is None or `esc` is None, this function throws
@@ -240,6 +289,9 @@ def csv_parseln(
 	esc_next = False
 
 	for c in p_line:
+		if c == '\n':
+			break
+
 		if esc_next:
 			buf.write(c)
 			esc_next = False
@@ -283,11 +335,13 @@ def csv_mkln(
 		a single value, being a list, then that list will
 		be used as the cells for the row.
 
+	:return str
+		The string representing the formatted CSV row.
+
 	If `delim` is None or `quote` is None or `esc` is None, this function throws
 	a ValueError.
 
 	If len(`delim`) != 1 or len(`quote`) != 1 or len(`esc`) != 1, this function
-	also throws a ValueError.
 	"""
 	if delim is None or quote is None or esc is None:
 		raise ValueError("delim, quote, and/or esc cannot be None")
@@ -317,6 +371,8 @@ def csv_writeln(
 	:param stream
 		The stream object to which to write the formatted CSV row to.
 	
+	:return void
+
 	If `stream` is None, a ValueError is raised.
 	"""
 	if stream is None:
@@ -364,11 +420,31 @@ class Stopwatch:
 		return "Stopwatch(%s)" % self.__repr__()
 
 
+BP_16K = 2 ** 14
+BP_32K = 2 ** 15
+BP_64K = 2 ** 16
+
 class BlockProcessReporter:
 	"""
 	A utility to report block processing operations to the user
 	while limiting standard output for increased performance.
 	"""
+	@classmethod
+	def file_lines(cls, path, block_size=BP_64K, large_bfsz=True, **kwargs):
+		if block_size < 1:
+			raise ValueError("block_size must be >= 1")
+		
+		handle = None
+		if large_bfsz:
+			handle = f_open_large_read(path, **kwargs)
+		else:
+			handle = open(path, **kwargs)
+
+		lines = f_line_count_fd(handle)
+		handle.close()
+
+		return cls(block_size, lines)
+
 	def __init__(self, block_size, tot_segments, fout=sys.stdout):
 		self._fout = fout
 
@@ -380,30 +456,46 @@ class BlockProcessReporter:
 		self._blocks = int(math.ceil(tot_segments / block_size))
 
 		# report data
+		self.stopwatch = Stopwatch()
 		self.message = "Processed Block"
+		self.append_percentage = True
+		self.append_message = True
 		self.append_block_ratio = True
-		self.prepend_percentage = True
+		self.append_stopwatch_time = True
 	
+	def start(self):
+		self.stopwatch.start()
+
 	def ping(self):
+		self.stopwatch.stop()
 		self._segment += 1
 		if self._segment % self._block_size == 0:
 			self._block += 1
 			self._print()
+			self.stopwatch.start()
 
 	def finish(self):
+		self.stopwatch.stop()
 		if self._segment % self._block_size > 0:
 			self._block += 1
 			self._print()
 	
 	def _print(self):
-		parts = (
-			"[%5.1f%%]" % (100 * self._block / self._blocks) if self.prepend_percentage else "",
-			self.message,
-			f"{self._block}/{self._blocks}" if self.append_block_ratio else ""
-		)
-		msgstr = ' '.join(parts)
-		self._fout.write(f"{msgstr}\n")
+		line = io.StringIO()
 
+		if self.append_percentage:
+			line.write("[%5.1f%%] " % (100 * self._block / self._blocks))
 
+		if self.append_message:
+			line.write(self.message)
+
+		if self.append_block_ratio:
+			line.write(" %d/%d" % (self._block, self._blocks))
+		
+		if self.append_stopwatch_time:
+			line.write(" (%s)" % (repr(self.stopwatch)))
+
+		self._fout.write(line.getvalue())
+		self._fout.write('\n')
 
 
