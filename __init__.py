@@ -4,6 +4,7 @@ import sys
 import math
 import time
 import string
+import enum
 from collections.abc import Iterable
 from pathlib import PurePath
 	
@@ -13,10 +14,12 @@ from pathlib import PurePath
 # | - Prefix meanings:                              |
 # |   - s_*   : string utilities                    |
 # |   - f_*   : file/stream utilities               |
+# |   - d_*   : Data structure utilities            |
 # |   - csv_* : CSV format utilities                |
 # |                                                 |
 # +-------------------------------------------------+
 
+# +-- Strings --------------------------------------+
 def s_map(p_string, domain, mapping):
 	"""
 	Replaces all characters of the `domain` in `p_string` with their
@@ -147,6 +150,7 @@ def s_norm(p_string, uppercase=False):
 	return ' '.join(nopunct.split())
 
 
+# +-- Files ----------------------------------------+
 def f_open_large_read(path, *args, **kwargs):
 	"""
 	A utility function to open a file handle for reading 
@@ -236,6 +240,37 @@ def f_line_count_fd(stream, *args, **kwargs):
 	return lines
 
 
+# +-- Data Structure -------------------------------+
+def d_index_no_except(seq, obj, i=None, j=None):
+	"""
+	Provides a no-exception wrapper for indexing sequence types. With
+	the exception of the first parameter, the interface for the sequence
+	`index` function is equivalent.
+
+	:param seq
+		The sequence object to index.
+
+	:param obj
+		The object whose index to retrieve.
+	
+	:param i
+		The inclusive starting index of the search.
+	
+	:param j
+		The exclusive ending index of the search.
+	"""
+	try:
+		if i is not None:
+			if j is not None:
+				return seq.index(obj, i=i, j=j)
+			else:
+				return seq.index(obj, i=i)
+		else:
+			return seq.index(obj)
+	except ValueError:
+		return -1
+
+# +-- CSV ------------------------------------------+
 def csv_parseln(
 		p_line, 
 		delim=',', 
@@ -499,3 +534,232 @@ class BlockProcessReporter:
 		self._fout.write('\n')
 
 
+class PageRank:
+	"""
+	Node, T, structure: 
+
+        T[0] - sentence index in the sample
+        T[1] - the score of the sentence
+        T[2] - list of inward connections represented by sentence indices.
+        T[3] - list of inward weights corresponding to some connections.
+        T[4] - list of outward connections represented by sentence indices.
+        T[5] - list of outward weights corresponding to some connections.
+	"""
+
+	class GraphView:
+
+		def __init__(self, graph):
+			self._graph = graph
+		
+		def value_of(self, i):
+			self._validate_node_reference(i)
+			return self._graph[i][0]
+		
+		def score_of(self, i):
+			self._validate_node_reference(i)
+			return self._graph[i][1]
+
+		def inputs_of(self, i):
+			self._validate_node_reference(i)
+			return zip(self._graph[i][2], self._graph[i][3])
+		
+		def outputs_of(self, i):
+			self._validate_node_reference(i)
+			return zip(self._graph[i][4], self._graph[i][5])
+
+		def _validate_node_reference(self, i):
+			if not isinstance(i, int) or i < 0 or len(self._graph) <= i:
+				raise ValueError("invalid node reference")
+
+	class LinkError(RuntimError):
+
+		def __init__(self, message=None):
+			super().__init__(message)
+
+	FORWARDS  = 0x1
+	BACKWARDS = 0x2
+	BI        = 0x3
+
+	class LinkMaker:
+
+		def __init__(self, i_tokens, j_tokens):
+			self.i_tokens = i_tokens
+			self.j_tokens = j_tokens
+
+		@property
+		def origin_tokens(self):
+			return self.i_tokens
+		
+		@property
+		def inbound_tokens(self):
+			return self.j_tokens
+
+		def origin(self, i1, i2, weight=1, direction=PageRank.BI, objects=False):
+			i1_pos, i2_pos = i1, i2
+			if objects:
+				i1_pos = d_index_no_except(self.i_tokens, i1)
+				i2_pos = d_index_no_except(self.i_tokens, i2)
+			self._validate_indices(i1_pos, i2_pos, self.i_tokens, self.i_tokens)
+			self._validate_direction(direction)
+			return weight, direction, i1_pos, i2_pos
+
+		def cross(self, i, j, weight=1, direction=PageRank.BI, objects=False):
+			i_pos, j_pos = i, j
+			if objects:
+				i_pos = d_index_no_except(self.i_tokens, i)
+				j_pos = d_index_no_except(self.j_tokens, j)
+			self._validate_indices(i_pos, j_pos, self.i_tokens, self.j_tokens)
+			self._validate_direction(direction)
+			return weight, direction, i_pos, len(self.i_tokens) + j_pos
+		
+		def inbound(self, j1, j2, weight=1, direction=PageRank.BI, objects=False):
+			j1_pos, j2_pos = j1, j2
+			if objects:
+				j1_pos = d_index_no_except(self.j_tokens, j1)
+				j2_pos = d_index_no_except(self.j_tokens, j2)
+			self._validate_indices(j1_pos, j2_pos, self.j_tokens, self.j_tokens)
+			self._validate_direction(direction)
+			return weight, direction, len(self.i_tokens) + j1_pos, len(self.i_tokens) + j2_pos
+
+		@staticmethod
+		def _validate_indices(i, j, i_seq, j_seq):
+			if not isinstance(i, int) or not isinstance(j, int):
+				raise ValueError("indices must be integer types")
+			if i < 0 or len(i_seq) <= i or \
+			   j < 0 or len(j_seq) <= j:
+				raise ValueError("link targets out of bounds")
+		
+		@staticmethod
+		def _validate_direction(direction):
+			if direction != PageRank.BI and \
+			   direction != PageRank.FORWARDS and \
+			   direction != PageRank.BACKWARDS:
+			    raise ValueError("direction must be either PageRank.BI, PageRank.FORWARDS, or PageRank.BACKWARDS")
+
+	def __init__(self, preprocs=None, link_func=None, rank_func=None):
+		self._preprocs = preprocs
+		self._link_func = link_func
+		self._rank_func = rank_func
+		self._table = {} # maps unique elements to their node index in self._graph
+		self._graph = [] # a list wrapping graph nodes
+		self._graph_view = PageRank.GraphView(self._graph)
+		self._tokens = []
+		self._validate_init()
+
+	def feed(self, raw_data, defscore=1):
+		# run the data transforms
+		tokens = raw_data
+		for p in self._preprocs:
+			tokens = p(tokens)
+
+		# validate that the final staged data & expand the graph
+		self._validate_feed_staged_data(tokens)
+		self._expand_graph(tokens, defscore)
+
+		# link the tokens
+		for weight, direction, i, j in link_func(self._tokens, tokens):
+			Icin, Iwin, Icout, Iwout = (None,) * 4
+			Jcin, Jwin, Jcout, Jwout = (None,) * 4
+			try:
+				_, _, Icin, Iwin, Icout, Iwout = self._graph[i]
+				_, _, Jcin, Jwin, Jcout, Jwout = self._graph[j]
+			except ValueError:
+				raise PageRank.LinkError("corrupted link table, do not modify the graph outside of the PageRank interface")
+
+			if (direction & PageRank.FORWARD):
+				i_has_ref = j in Icout
+				j_has_ref = i in Jcin
+				if i_has_ref and j_has_ref
+					raise PageRank.LinkError("nodes are already linked in the forward direction")
+				if i_has_ref != j_has_ref:
+					raise PageRank.LinkError("corrupted link table, do not modify graph outside of the PageRank interface")
+				Icout.append(j)
+				Iwout.append(weight)
+				Jcin.append(i)
+				Jwin.append(weight)
+			
+			if (direction & PageRank.BACKWARDS):
+				i_has_ref = j in Icin
+				j_has_ref = i in Jcout
+				if i_has_ref and j_has_ref:
+					raise PageRank.LinkError("nodes are already linked in the backward direction")
+				if i_has_ref != j_has_ref:
+					raise PageRank.LinkError("corrupted link table, do not modify graph outside of the PageRank interface")
+				Icin.append(j)
+				Iwin.append(weight)
+				Jcout.append(i)
+				Jwout.append(weight)
+
+		self._tokens.extend(tokens)
+	
+	def get_node_count(self):
+		return len(self._graph)
+
+	def set_scores(self, score_func=None):
+		if score_func is None or not callable(score_func):
+			raise ValueError("the score function must be a callable object")
+		for i, g in enumerate(self._graph):
+			g[1] = score_func(self._graph_view, i)
+
+	def set_inverse_uniform_scores(self):
+		u_score = 1 / len(self._graph)
+		for g in graph:
+			g[1] = u_score
+	
+	def set_constant_uniform_scores(self, const=1):
+		for g in graph:
+			g[1] = const
+
+	def execute(self, convthresh=1e-4):
+		err = convthresh
+		rescore_buffer = [ x[1] for x in self._graph ]
+		while err >= convthresh:
+			for i, node in enumerate(self._graph):
+				n_score = self._rank_func(self._graph_view, i)
+				err = abs(n_score - rescore_buffer[i])
+				rescore_buffer[i] = n_score
+				if err < convthresh: # the paper states to stop as soon as one
+					break            # evaluation goes below the threshold.
+			for i, s in enumerate(rescore_buffer):
+				self._graph[i][1] = s
+		
+		ranked_graph = sorted(self._graph, key=lambda x: x[1], reverse=True)
+		ranked_table = []
+		for g in ranked_graph: # manual zip to avoid zipping the 4 other lists
+			ranked_table.append((g[0], g[1]))
+		return ranked_table
+
+	def _expand_graph(self, tokens, defscore):
+		for token in tokens:
+			self._graph.append([ token, defscore, [], [], [], []])
+
+	def _validate_init(self):
+		# validate preprocessors
+		if self._preprocs is None:
+			raise ValueError("at least one preprocessor function must be specified")
+
+		if not isinstance(self._preprocs, Iterable):
+			raise ValueError("preprocessors must be in an iterable container")
+
+		for p in self._preprocs:
+			if not callable(p):
+				raise ValueError(f"object {p} is not a valid preprocessor function")
+
+		# validate the link function
+		if self._link_func is None:
+			raise ValueError("a link function must be specified")
+
+		if not callable(self._link_func):
+			raise ValueError("the link function must be a callable object")
+
+		# validate the rank function
+		if self._rank_func is None:
+			raise ValueError("a rank function must be specified")
+
+		if not callable(self._rank_func):
+			raise ValueError("the rank function must be a callable object")
+
+	def _validate_feed_tokens(self, tokens):
+		# ensure that it is an iterable
+		if not isinstance(tokens, Iterable):
+			raise ValueError("the final preprocessor stage must yield an iterable of tokens")
