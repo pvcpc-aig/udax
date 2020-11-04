@@ -5,7 +5,7 @@ import math
 import time
 import string
 import enum
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence, Mapping
 from pathlib import PurePath
 	
 # +-------------------------------------------------+
@@ -269,6 +269,7 @@ def d_index_no_except(seq, obj, i=None, j=None):
 			return seq.index(obj)
 	except ValueError:
 		return -1
+
 
 # +-- CSV ------------------------------------------+
 def csv_parseln(
@@ -534,6 +535,156 @@ class BlockProcessReporter:
 		self._fout.write('\n')
 
 
+PR_FORWARDS  = 0x1
+PR_BACKWARDS = 0x2
+PR_BI        = 0x3
+
+class PrGraphView:
+
+	def __init__(self, graph):
+		self._graph = graph
+	
+	def value_of(self, i):
+		self._validate_node_reference(i)
+		return self._graph[i][0]
+	
+	def score_of(self, i):
+		self._validate_node_reference(i)
+		return self._graph[i][1]
+
+	def inputs_of(self, i, include_weights=True):
+		self._validate_node_reference(i)
+		if include_weights:
+			return zip(self._graph[i][2], self._graph[i][3])
+		else:
+			return self._graph[i][2]
+	
+	def outputs_of(self, i, include_weights=True):
+		self._validate_node_reference(i)
+		if include_weights:
+			return zip(self._graph[i][4], self._graph[i][5])
+		else:
+			return self._graph[i][4]
+
+	def _validate_node_reference(self, i):
+		if not isinstance(i, int) or i < 0 or len(self._graph) <= i:
+			raise ValueError("invalid node reference")
+
+class PrLinkError(RuntimeError):
+
+	def __init__(self, message=None):
+		super().__init__(message)
+
+class PrRanker:
+
+	@staticmethod
+	def pagerank(damp=0.85):
+		if damp < 0 or 1 < damp:
+			raise ValueError("damping factor must be in the range [0, 1]")
+		def _pagerank(G, i):
+			nonlocal damp
+
+			Lcin = G.inputs_of(i, include_weights=False)
+			sum = 0
+			for j in Lcin:
+				Jscore = G.score_of(j)
+				Jcout = G.outputs_of(j, include_weights=False)
+				sum += Jscore / len(Jcout)
+			return (1 - damp) + damp * sum
+
+		return _pagerank
+
+class PrLinkMaker:
+
+	@staticmethod
+	def proxy(rad=2, weight=1, direction=PR_FORWARDS):
+		if direction == PR_BI:
+			raise ValueError("the proxy linker already establish bidrectional links, use PR_FORWARDS or PR_BACKWARDS")
+
+		rad = max(0, rad)
+		def _proxy(linker: PrLinkMaker):
+			nonlocal rad 
+			i_tokens = linker.i_tokens
+			j_tokens = linker.j_tokens
+			i_size = len(linker.i_tokens)
+			j_size = len(linker.j_tokens)
+			size = i_size + j_size
+			k = i_size
+			while k < size:
+				low = max(0, k - rad)
+				high = min(size - 1, k + rad)
+				while low <= high:
+					if low != k:
+						yield linker.monolithic(k, low, weight, direction)
+					low += 1
+				k += 1
+
+		return _proxy
+
+	def __init__(self, i_tokens, j_tokens):
+		self.i_tokens = i_tokens
+		self.j_tokens = j_tokens
+
+	@property
+	def origin_tokens(self):
+		return self.i_tokens
+	
+	@property
+	def inbound_tokens(self):
+		return self.j_tokens
+
+	def origin(self, i1, i2, weight=1, direction=PR_FORWARDS, objects=False):
+		i1_pos, i2_pos = i1, i2
+		if objects:
+			i1_pos = d_index_no_except(self.i_tokens, i1)
+			i2_pos = d_index_no_except(self.i_tokens, i2)
+		return self.monolithic(i1_pos, i2_pos, weight, direction)
+
+	def cross(self, i, j, weight=1, direction=PR_FORWARDS, objects=False):
+		i_pos, j_pos = i, j
+		if objects:
+			i_pos = d_index_no_except(self.i_tokens, i)
+			j_pos = d_index_no_except(self.j_tokens, j)
+		return self.monolithic(i_pos, len(self.i_tokens) + j_pos, weight, direction)
+	
+	def inbound(self, j1, j2, weight=1, direction=PR_FORWARDS, objects=False):
+		j1_pos, j2_pos = j1, j2
+		if objects:
+			j1_pos = d_index_no_except(self.j_tokens, j1)
+			j2_pos = d_index_no_except(self.j_tokens, j2)
+		return self.monolithic(
+			len(self.i_tokens) + j1_pos, 
+			len(self.i_tokens) + j2_pos, 
+			weight, direction)
+	
+	def monolithic(self, i, j, weight=1, direction=PR_FORWARDS):
+		i_size = len(self.i_tokens)
+		j_size = len(self.j_tokens)
+		size = i_size + j_size
+		self._validate_indices(i, j, size, size, seq_sizes=True)
+		self._validate_direction(direction)
+		return weight, direction, i, j
+
+	@staticmethod
+	def _validate_indices(i, j, i_seq, j_seq, seq_sizes=False):
+		if not isinstance(i, int) or not isinstance(j, int):
+			raise ValueError("indices must be integer types")
+		if seq_sizes:
+			if i < 0 or i_seq <= i or \
+			   j < 0 or j_seq <= j:
+				raise ValueError("link targets out of bounds")
+		else:
+			if i < 0 or len(i_seq) <= i or \
+			   j < 0 or len(j_seq) <= j:
+				raise ValueError("link targets out of bounds or don't exist")
+	
+	@staticmethod
+	def _validate_direction(direction):
+		if direction != PR_BI and \
+			direction != PR_FORWARDS and \
+			direction != PR_BACKWARDS:
+			raise ValueError("direction must be either PageRank.BI, PageRank.FORWARDS, or PageRank.BACKWARDS")
+
 class PageRank:
 	"""
 	Node, T, structure: 
@@ -546,103 +697,12 @@ class PageRank:
         T[5] - list of outward weights corresponding to some connections.
 	"""
 
-	class GraphView:
-
-		def __init__(self, graph):
-			self._graph = graph
-		
-		def value_of(self, i):
-			self._validate_node_reference(i)
-			return self._graph[i][0]
-		
-		def score_of(self, i):
-			self._validate_node_reference(i)
-			return self._graph[i][1]
-
-		def inputs_of(self, i):
-			self._validate_node_reference(i)
-			return zip(self._graph[i][2], self._graph[i][3])
-		
-		def outputs_of(self, i):
-			self._validate_node_reference(i)
-			return zip(self._graph[i][4], self._graph[i][5])
-
-		def _validate_node_reference(self, i):
-			if not isinstance(i, int) or i < 0 or len(self._graph) <= i:
-				raise ValueError("invalid node reference")
-
-	class LinkError(RuntimError):
-
-		def __init__(self, message=None):
-			super().__init__(message)
-
-	FORWARDS  = 0x1
-	BACKWARDS = 0x2
-	BI        = 0x3
-
-	class LinkMaker:
-
-		def __init__(self, i_tokens, j_tokens):
-			self.i_tokens = i_tokens
-			self.j_tokens = j_tokens
-
-		@property
-		def origin_tokens(self):
-			return self.i_tokens
-		
-		@property
-		def inbound_tokens(self):
-			return self.j_tokens
-
-		def origin(self, i1, i2, weight=1, direction=PageRank.BI, objects=False):
-			i1_pos, i2_pos = i1, i2
-			if objects:
-				i1_pos = d_index_no_except(self.i_tokens, i1)
-				i2_pos = d_index_no_except(self.i_tokens, i2)
-			self._validate_indices(i1_pos, i2_pos, self.i_tokens, self.i_tokens)
-			self._validate_direction(direction)
-			return weight, direction, i1_pos, i2_pos
-
-		def cross(self, i, j, weight=1, direction=PageRank.BI, objects=False):
-			i_pos, j_pos = i, j
-			if objects:
-				i_pos = d_index_no_except(self.i_tokens, i)
-				j_pos = d_index_no_except(self.j_tokens, j)
-			self._validate_indices(i_pos, j_pos, self.i_tokens, self.j_tokens)
-			self._validate_direction(direction)
-			return weight, direction, i_pos, len(self.i_tokens) + j_pos
-		
-		def inbound(self, j1, j2, weight=1, direction=PageRank.BI, objects=False):
-			j1_pos, j2_pos = j1, j2
-			if objects:
-				j1_pos = d_index_no_except(self.j_tokens, j1)
-				j2_pos = d_index_no_except(self.j_tokens, j2)
-			self._validate_indices(j1_pos, j2_pos, self.j_tokens, self.j_tokens)
-			self._validate_direction(direction)
-			return weight, direction, len(self.i_tokens) + j1_pos, len(self.i_tokens) + j2_pos
-
-		@staticmethod
-		def _validate_indices(i, j, i_seq, j_seq):
-			if not isinstance(i, int) or not isinstance(j, int):
-				raise ValueError("indices must be integer types")
-			if i < 0 or len(i_seq) <= i or \
-			   j < 0 or len(j_seq) <= j:
-				raise ValueError("link targets out of bounds")
-		
-		@staticmethod
-		def _validate_direction(direction):
-			if direction != PageRank.BI and \
-			   direction != PageRank.FORWARDS and \
-			   direction != PageRank.BACKWARDS:
-			    raise ValueError("direction must be either PageRank.BI, PageRank.FORWARDS, or PageRank.BACKWARDS")
-
 	def __init__(self, preprocs=None, link_func=None, rank_func=None):
 		self._preprocs = preprocs
 		self._link_func = link_func
 		self._rank_func = rank_func
-		self._table = {} # maps unique elements to their node index in self._graph
-		self._graph = [] # a list wrapping graph nodes
-		self._graph_view = PageRank.GraphView(self._graph)
+		self._graph = [] 
+		self._graph_view = PrGraphView(self._graph)
 		self._tokens = []
 		self._validate_init()
 
@@ -653,38 +713,38 @@ class PageRank:
 			tokens = p(tokens)
 
 		# validate that the final staged data & expand the graph
-		self._validate_feed_staged_data(tokens)
+		self._validate_feed_tokens(tokens)
 		self._expand_graph(tokens, defscore)
 
 		# link the tokens
-		for weight, direction, i, j in link_func(self._tokens, tokens):
+		for weight, direction, i, j in self._link_func(PrLinkMaker(self._tokens, tokens)):
 			Icin, Iwin, Icout, Iwout = (None,) * 4
 			Jcin, Jwin, Jcout, Jwout = (None,) * 4
 			try:
 				_, _, Icin, Iwin, Icout, Iwout = self._graph[i]
 				_, _, Jcin, Jwin, Jcout, Jwout = self._graph[j]
 			except ValueError:
-				raise PageRank.LinkError("corrupted link table, do not modify the graph outside of the PageRank interface")
+				raise PrLinkError("corrupted link table, do not modify the graph outside of the PageRank interface")
 
-			if (direction & PageRank.FORWARD):
+			if (direction & PR_FORWARDS):
 				i_has_ref = j in Icout
 				j_has_ref = i in Jcin
-				if i_has_ref and j_has_ref
-					raise PageRank.LinkError("nodes are already linked in the forward direction")
+				if i_has_ref and j_has_ref:
+					raise PrLinkError("nodes are already linked in the forward direction")
 				if i_has_ref != j_has_ref:
-					raise PageRank.LinkError("corrupted link table, do not modify graph outside of the PageRank interface")
+					raise PrLinkError("corrupted link table, do not modify graph outside of the PageRank interface")
 				Icout.append(j)
 				Iwout.append(weight)
 				Jcin.append(i)
 				Jwin.append(weight)
 			
-			if (direction & PageRank.BACKWARDS):
+			if (direction & PR_BACKWARDS):
 				i_has_ref = j in Icin
 				j_has_ref = i in Jcout
 				if i_has_ref and j_has_ref:
-					raise PageRank.LinkError("nodes are already linked in the backward direction")
+					raise PrLinkError("nodes are already linked in the backward direction")
 				if i_has_ref != j_has_ref:
-					raise PageRank.LinkError("corrupted link table, do not modify graph outside of the PageRank interface")
+					raise PrLinkError("corrupted link table, do not modify graph outside of the PageRank interface")
 				Icin.append(j)
 				Iwin.append(weight)
 				Jcout.append(i)
@@ -703,11 +763,11 @@ class PageRank:
 
 	def set_inverse_uniform_scores(self):
 		u_score = 1 / len(self._graph)
-		for g in graph:
+		for g in self._graph:
 			g[1] = u_score
 	
 	def set_constant_uniform_scores(self, const=1):
-		for g in graph:
+		for g in self._graph:
 			g[1] = const
 
 	def execute(self, convthresh=1e-4):
