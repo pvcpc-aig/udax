@@ -7,19 +7,36 @@ import string
 import enum
 from collections.abc import Iterable, Sequence, Mapping
 from pathlib import PurePath
-	
-# +-------------------------------------------------+
-# | Utility Functions:                              |
-# |                                                 |
-# | - Prefix meanings:                              |
-# |   - s_*   : string utilities                    |
-# |   - f_*   : file/stream utilities               |
-# |   - d_*   : Data structure utilities            |
-# |   - csv_* : CSV format utilities                |
-# |                                                 |
-# +-------------------------------------------------+
+
+
+def deprecated(since=None, reason=None, alternative=None):
+	def _deprecated(func):
+		import io
+		import sys
+
+		msg = io.StringIO()
+		msg.write(f"[WARN]: {func.__name__} is deprecated")
+		if since is not None:
+			msg.write(f" since {since}")
+		if reason is not None:
+			msg.write(f": {reason}")
+		if alternative is not None:
+			msg.write(f", use {alternative} instead")
+		msg.write('.')
+		msgstr = msg.getvalue()
+
+		def _run_deprecated(*args, **kwargs):
+			nonlocal msgstr, func
+			print(msgstr, file=sys.stderr)
+			return func(*args, **kwargs)
+
+		return _run_deprecated
+
+	return _deprecated
+
 
 # +-- Strings --------------------------------------+
+@deprecated(reason="moved to separate module", alternative="udax.strutil.map")
 def s_map(p_string, domain, mapping):
 	"""
 	Replaces all characters of the `domain` in `p_string` with their
@@ -80,6 +97,7 @@ def s_map(p_string, domain, mapping):
 	return res.getvalue()
 
 
+@deprecated(reason="moved to separate module", alternative="udax.strutil.reppunct")
 def s_reppunct(p_string, mapping):
 	"""
 	Replaces puncutation characters in the given string with a custom
@@ -103,6 +121,7 @@ def s_reppunct(p_string, mapping):
 	return s_map(p_string, string.punctuation, mapping)
 
 
+@deprecated(reason="moved to separate module", alternative="udax.strutil.rempunct")
 def s_rempunct(p_string):
 	"""
 	Removes punctuation characters from the given string. Punctuation
@@ -115,6 +134,7 @@ def s_rempunct(p_string):
 	return s_reppunct(p_string, '')
 
 
+@deprecated(reason="moved to separate module", alternative="udax.strutil.liftpunct")
 def s_liftpunct(p_string):
 	"""
 	Similar to `s_rempunct`, but this will replace all puncutation with
@@ -128,6 +148,7 @@ def s_liftpunct(p_string):
 	return s_reppunct(p_string, ' ')
 
 
+@deprecated(reason="moved to separate module", alternative="udax.strutil.norm")
 def s_norm(p_string, uppercase=False):
 	"""
 	Filters out all punctuation, normalizes the casing to either
@@ -151,6 +172,7 @@ def s_norm(p_string, uppercase=False):
 
 
 # +-- Files ----------------------------------------+
+@deprecated()
 def f_open_large_read(path, *args, **kwargs):
 	"""
 	A utility function to open a file handle for reading 
@@ -170,6 +192,7 @@ def f_open_large_read(path, *args, **kwargs):
 	return open(path, **kwargs)
 
 
+@deprecated()
 def f_open_large_write(path, *args, **kwargs):
 	"""
 	A utility function to open a file handle for reading 
@@ -189,6 +212,7 @@ def f_open_large_write(path, *args, **kwargs):
 	return open(path, **kwargs)
 
 
+@deprecated(reason="moved to separate module", alternative="udax.files.line_count")
 def f_line_count(path, *args, **kwargs):
 	"""
 	A quick utility function to count the number of lines in
@@ -208,6 +232,7 @@ def f_line_count(path, *args, **kwargs):
 	return lines
 
 
+@deprecated(reason="moved to separate module", alternative="udax.files.line_count")
 def f_line_count_fd(stream, *args, **kwargs):
 	"""
 	A quick utility function to count the remaining number of
@@ -241,6 +266,7 @@ def f_line_count_fd(stream, *args, **kwargs):
 
 
 # +-- Data Structure -------------------------------+
+@deprecated(reason="moved to separate module", alternative="udax.ds.index")
 def d_index_no_except(seq, obj, i=None, j=None):
 	"""
 	Provides a no-exception wrapper for indexing sequence types. With
@@ -272,6 +298,7 @@ def d_index_no_except(seq, obj, i=None, j=None):
 
 
 # +-- CSV ------------------------------------------+
+@deprecated(reason="moved to separate module", alternative="udax.csv.parseln")
 def csv_parseln(
 		p_line, 
 		delim=',', 
@@ -355,6 +382,7 @@ def csv_parseln(
 	return cells
 
 
+@deprecated(reason="moved to separate module", alternative="udax.csv.mkln")
 def csv_mkln(
 		*args,
 		delim=',',
@@ -394,6 +422,7 @@ def csv_mkln(
 	return delim.join([_format_cell(x) for x in args])
 
 
+@deprecated(reason="moved to separate module", alternative="udax.csv.writeln")
 def csv_writeln(
 		*args,
 		stream=None,
@@ -575,51 +604,8 @@ class PrLinkError(RuntimeError):
 	def __init__(self, message=None):
 		super().__init__(message)
 
-class PrRanker:
-
-	@staticmethod
-	def pagerank(damp=0.85):
-		if damp < 0 or 1 < damp:
-			raise ValueError("damping factor must be in the range [0, 1]")
-		def _pagerank(G, i):
-			nonlocal damp
-
-			Lcin = G.inputs_of(i, include_weights=False)
-			sum = 0
-			for j in Lcin:
-				Jscore = G.score_of(j)
-				Jcout = G.outputs_of(j, include_weights=False)
-				sum += Jscore / len(Jcout)
-			return (1 - damp) + damp * sum
-
-		return _pagerank
-
 class PrLinkMaker:
 
-	@staticmethod
-	def proxy(rad=2, weight=1, direction=PR_FORWARDS):
-		if direction == PR_BI:
-			raise ValueError("the proxy linker already establish bidrectional links, use PR_FORWARDS or PR_BACKWARDS")
-
-		rad = max(0, rad)
-		def _proxy(linker: PrLinkMaker):
-			nonlocal rad 
-			i_tokens = linker.i_tokens
-			j_tokens = linker.j_tokens
-			i_size = len(linker.i_tokens)
-			j_size = len(linker.j_tokens)
-			size = i_size + j_size
-			k = i_size
-			while k < size:
-				low = max(0, k - rad)
-				high = min(size - 1, k + rad)
-				while low <= high:
-					if low != k:
-						yield linker.monolithic(k, low, weight, direction)
-					low += 1
-				k += 1
-
-		return _proxy
 
 	def __init__(self, i_tokens, j_tokens):
 		self.i_tokens = i_tokens
