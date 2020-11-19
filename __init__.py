@@ -35,6 +35,22 @@ def deprecated(since=None, reason=None, alternative=None):
 	return _deprecated
 
 
+def time_it(func):
+	def _func(*args, **kwargs):
+		nonlocal func
+
+		begin = time.monotonic_ns()
+		result = func(*args, **kwargs)
+		end = time.monotonic_ns()
+		delta = end - begin
+
+		print("'%s' execution time: %.2fs | %.2fms | %dμs | %dns" % \
+			(func.__name__, delta * 1e-9, delta * 1e-6, delta * 1e-3, delta))
+
+		return result
+	return _func
+
+
 # +-- Strings --------------------------------------+
 @deprecated(reason="moved to separate module", alternative="udax.strutil.map")
 def s_map(p_string, domain, mapping):

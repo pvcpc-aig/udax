@@ -5,6 +5,7 @@ https://www.aclweb.org/anthology/W04-1013.pdf
 """
 from io import IOBase
 from math import factorial
+from array import array
 from pathlib import PurePath, Path
 from collections.abc import Iterable, Sequence
 
@@ -13,6 +14,146 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 
 
 # --- Utilities: General -----------------------------------------------
+def _lcs_sequence_length(X, Y, traceback=False):
+    if len(X) == 0 or len(Y) == 0:
+        return 0
+
+    # a len(Y) by len(X) table of lengths
+    table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
+
+    def _query(i, j):
+        nonlocal table
+        return (
+            table[i][j],
+            0 if i == 0 else table[i-1][j],
+            0 if j == 0 else table[i][j-1],
+            0 if i == 0 or j == 0 else table[i-1][j-1]
+        )
+
+    for i, x in enumerate(X):
+        for j, y in enumerate(Y):
+            _, top, left, top_left = _query(i, j)
+            if x == y:
+                table[i][j] = top_left + 1
+            else:
+                table[i][j] = max(top, left)
+    
+    def _trace_back(i, j):
+        if i < 0 or j < 0:
+            return []
+
+        nonlocal X, table, _query
+        current, top, left, top_left = _query(i, j)
+
+        if current > top and current > left:
+            char = X[i]
+            rest = _trace_back(i - 1, j - 1)
+            if len(rest) == 0:
+                return [ [ char ] ]
+            else:
+                return [ [ *x, char ] for x in rest ]
+        elif top > left:
+            return _trace_back(i - 1, j)
+        elif left > top:
+            return _trace_back(i, j - 1)
+        else:
+            rest_top = _trace_back(i - 1, j)
+            rest_left = _trace_back(i, j - 1)
+            return [ *rest_top, *rest_left ]
+    
+    if traceback:
+        return _trace_back(len(X) - 1, len(Y) - 1), table[-1][-1]
+
+    return table[-1][-1]
+
+
+def _wlcs_sequence_length(X, Y, weight_f):
+    if not callable(weight_f):
+        raise ValueError("weight_f function must be specified")
+
+    # the two tables used in the algorithm specified by the paper
+    w_table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
+    c_table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
+
+    def _query(table, i, j):
+        return (
+            table[i][j],
+            0 if i == 0 else table[i - 1][j],
+            0 if j == 0 else table[i][j - 1],
+            0 if i == 0 or j == 0 else table[i - 1][j - 1]
+        )
+
+    for i, x in enumerate(X):
+        for j, y in enumerate(Y):
+            if x == y:
+                _, _, _, k = _query(w_table, i, j)
+                _, _, _, l = _query(c_table, i, j)
+                c_table[i][j] = l + weight_f(k + 1) - weight_f(k)
+                w_table[i][j] = k + 1
+            else:
+                _, top, left, _ = _query(c_table, i, j)
+                if top > left:
+                    c_table[i][j] = top
+                else:
+                    c_table[i][j] = left
+    
+    return c_table[-1][-1]
+
+
+def _lcs_string_length(X, Y, traceback=False):
+    if len(X) == 0 or len(Y) == 0:
+        return 0
+
+    # a len(Y) by len(X) table of lengths
+    table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
+    ref = []
+    maxlen = 0
+
+    def _query(i, j):
+        nonlocal table
+        return (
+            table[i][j],
+            0 if i == 0 else table[i-1][j],
+            0 if j == 0 else table[i][j-1],
+            0 if i == 0 or j == 0 else table[i-1][j-1]
+        )
+    
+    for i, x in enumerate(X):
+        for j, y in enumerate(Y):
+            _, top, left, top_left = _query(i, j)
+            top_left_p1 = top_left + 1
+            if x == y:
+                table[i][j] = top_left_p1
+                if top_left_p1 >= maxlen:
+                    ref.append((top_left_p1, i, j))
+                    maxlen = top_left_p1
+    
+    def _trace_back(i, j):
+        nonlocal X, _query
+        result = []
+
+        k = 0
+        max_k = min(i, j)
+        while k <= max_k:
+            current, _, _, _ = _query(i - k, j - k)
+            if current <= 0:
+                break
+            result.insert(0, X[i - k])
+            k += 1
+        
+        return result
+
+    if traceback:
+        results = []
+        for x in reversed(ref):
+            if x[0] < maxlen:
+                break
+            results.append(_trace_back(x[1], x[2]))
+        return results, maxlen
+
+    return maxlen
+
+
 def _lcs(seq_a, seq_b):
     # TODO: implement O(n^2) with dynprog instead of the O(n^3) solution now
     # TODO: the paper uses LCS that allows sub-sequences to not be 
@@ -90,8 +231,26 @@ def _C(n, r):
 # --- Utilities: Loading & Pre-processing ------------------------------
 def _get_string_content(named_sources, include_name_list=True):
     """
+    Iterates a dictionary of named document sources and loads in their
+    content. The document values may be any of the following:
+
+        - String:    the string itself,
+        - Path-like: the content of the file it points to,
+        - IO-like:   the content of the IO stream,
+        - Iterable:  the concatenated __str__ of the objects,
+
+    If the documents are not one of those types, a ValueError is raised.
+
+    :param named_sources
+        A dictionary of documents to load whose names are given by
+        their key in the dictionary.
+    
+    :param include_name_list
+        Option dictating whether to include the list of names for each
+        document received in the dictionary.
+
     :return
-        (<bool:success>, <str:report>, <list:result>)
+        (<bool:success>, <str:report>, [<list:names>,] <list:result>)
     """
     names = []
     loaded = []
@@ -104,7 +263,7 @@ def _get_string_content(named_sources, include_name_list=True):
             elif isinstance(source, IOBase):
                 loaded.append(source.read())
             elif isinstance(source, Iterable):
-                loaded.append(''.join(source))
+                loaded.append(''.join([ str(x) for x in source ]))
             else:
                 return False, f"unknown source '{name}' type {type(source)}", None
             names.append(str(name))
@@ -118,6 +277,32 @@ def _get_string_content(named_sources, include_name_list=True):
         
 
 def _rouge_prepare(named_documents, tokenizer=word_tokenize, preprocs=None, include_raw_content=False):
+    """
+    A function wrapping common routines to extract content from documents
+    to be evaluated by any of the ROUGE functions.
+
+    :param named_documents
+        The dictionary of named documents; see `_get_string_content(...)`
+    
+    :param tokenizer
+        The word tokenizer to use when splitting the document sources
+        into individual tokens. 
+
+        NOTE: the tokenizer *always* runs before the `preprocs`.
+    
+    :param preprocs
+        An iterable of callable objects that perform additional preprocessing
+        steps on the tokenized data. The preprocessors are executed in the
+        order in which they are iterated.
+
+    :return
+        If include_raw_content is true, the original content string list
+        and the processed tokens are returned in a tuple.
+            ([r1, r2, r3, ...], [p1, p2, p3, ...])
+        
+        Otherwise, the list of processed tokens is returned.
+            [p1, p2, p3, ...]
+    """
     # validate params
     if not callable(tokenizer):
         raise ValueError("a callable tokenizer object must be specified")
@@ -127,32 +312,45 @@ def _rouge_prepare(named_documents, tokenizer=word_tokenize, preprocs=None, incl
     if not success:
         raise ValueError(f"failed to load content: {report}")
 
-    if preprocs is None:
-        if include_raw_content:
-            return [ (x, tokenizer(x)) for x in loaded ]
-        else:
-            return [ tokenizer(x) for x in loaded ]
-    else:
-        prepared = []
-        for content in loaded:
-            tokens = tokenizer(content)
-            for preproc in preprocs:
-                if not callable(preproc):
-                    raise ValueError(f"pre-processor at index {i} is not a callable object")
-                tokens = preproc(tokens)
-            prepared.append(tokens)
-        if include_raw_content:
-            return loaded, prepared
+    if preprocs is None: # initialize empty list for convenience
+        preprocs = []
+
+    prepared = []
+    for content in loaded:
+        tokens = tokenizer(content)
+        for preproc in preprocs:
+            if not callable(preproc):
+                raise ValueError(f"pre-processor at index {i} is not a callable object")
+            tokens = preproc(tokens)
+        prepared.append(tokens)
+    if include_raw_content:
+        return loaded, prepared
+    return prepared
 
 
 # --- Interface --------------------------------------------------------
-def rouge_n(ref, can, preprocs=None, tokenizer=word_tokenize, n=1):
+def rouge_n(ref, can, tokenizer=word_tokenize, preprocs=None, n=1, beta=1):
     # TODO: implement Jackknifing option
     """
-    Currently only single reference document is supported.
+    Evaluates the candidate document against the reference document
+    using the n-gram ROUGE evaluation routine.
 
-    Compute the precision, recall, and f-measure of the overlap
-    of the candidate document with the reference documents.
+    :param ref
+        The reference summary.
+    
+    :param can
+        The candidate summary.
+    
+    :param tokenizer
+        A callable object used to transform strings into word-like
+        tokens.
+    
+    :param preprocs
+        Preprocessor callable objects that perform operations on the
+        tokens after the document has been tokenized.
+    
+    :return
+        (<float:recall>, <float:precision>, <float:f-measure>)
     """
     r_tokens, c_tokens = _rouge_prepare(
         { "reference": ref, "candidate": can },
@@ -189,16 +387,35 @@ def rouge_n(ref, can, preprocs=None, tokenizer=word_tokenize, n=1):
     # compute statistics and finish
     R = c_matched / r_total
     P = c_matched / c_total
-    F = 2 * (precision * recall) / (precision + recall)
+    F = (1 + beta * beta) * R * P / (R + beta * beta * P)
     return R, P, F
 
 
 def rouge_lcs_sentence(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1):
     """
-    Currently only single reference document is supported.
+    Evaluates the candidate sentence document against the reference
+    sentence document using the longest common subsequence ROUGE
+    evaluation routine.
 
-    Compute the harmonic weighted mean of the length of the 
-    longest common sub-sequence of words of both documents.
+    This differs from `rouge_lcs_summary` by using a slightly altered
+    algorithm on sentences rather than on summaries.
+
+    :param ref
+        The reference summary.
+    
+    :param can
+        The candidate summary.
+    
+    :param tokenizer
+        A callable object used to transform strings into word-like
+        tokens.
+    
+    :param preprocs
+        Preprocessor callable objects that perform operations on the
+        tokens after the document has been tokenized.
+    
+    :return
+        (<float:recall>, <float:precision>, <float:f-measure>)
     """
     r_tokens, c_tokens = _rouge_prepare(
         { "reference": ref, "candidate": can },
@@ -206,11 +423,7 @@ def rouge_lcs_sentence(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1)
         preprocs=preprocs
     )
 
-    lcs_result = _lcs(r_tokens, c_tokens)
-    if lcs_result is None:
-        raise ValueError("documents have not be tokenized into a sequence of tokens")
-
-    _, _, length = lcs_result
+    length = _lcs_sequence_length(r_tokens, c_tokens)
     R = length / len(r_tokens)
     P = length / len(c_tokens)
     F = (1 + beta * beta) * R * P / (R + beta * beta * P)
@@ -218,6 +431,35 @@ def rouge_lcs_sentence(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1)
 
 
 def rouge_lcs_summary(ref, can, sent_tokenizer=sent_tokenize, tokenizer=word_tokenize, preprocs=None, beta=1):
+    """
+    Evaluates the candidate summary document against the reference
+    summary document using the longest common subsequence ROUGE
+    evaluation routine.
+
+    This differs from `rouge_lcs_sentence` by using a slightly altered
+    algorithm on summaries rather than on sentences.
+
+    :param ref
+        The reference summary.
+    
+    :param can
+        The candidate summary.
+    
+    :param sent_tokenizer
+        A callable object used to transform strings into sentence-like
+        tokens.
+    
+    :param tokenizer
+        A callable object used to transform strings into word-like
+        tokens.
+    
+    :param preprocs
+        Preprocessor callable objects that perform operations on the
+        tokens after the document has been tokenized.
+    
+    :return
+        (<float:recall>, <float:precision>, <float:f-measure>)
+    """
     if not callable(sent_tokenizer):
         raise ValueError("a callable sent_tokenizer object must be specified")
 
@@ -239,13 +481,11 @@ def rouge_lcs_summary(ref, can, sent_tokenizer=sent_tokenize, tokenizer=word_tok
             tokenizer=tokenizer,
             preprocs=preprocs
         )
-        lcs_result = _lcs(r_sent_tokens, c_tokens)
+        traceback, length = _lcs_sequence_length(r_sent_tokens, c_tokens, traceback=True)
         if lcs_result is None:
             raise ValueError("documents have not be tokenized into a sequence of tokens")
 
-        r_index, c_index, length = lcs_result
-        for common_token in r_sent_tokens[r_index : r_index + length]:
-            common_tokens.add(common_token)
+        common_tokens.update(*traceback)
         common_tokens_total += length
 
     if common_tokens_total == 0:
@@ -258,19 +498,90 @@ def rouge_lcs_summary(ref, can, sent_tokenizer=sent_tokenize, tokenizer=word_tok
     return R, P, F
 
 
-def rouge_wlcs(ref, can, sent_tokenizer=sent_tokenize, tokenizer=word_tokenize, preprocs=None):
-    # TODO: not implemented; review LCS/WLCS sections in the paper
-    # again; apparently the current LCS implementations seem to be
-    # the weighted LCS (WLCS) already, otherwise they're broken.
-    pass
+def rouge_wlcs_sentence(ref, can, weight_f, inv_weight_f, tokenizer=word_tokenize, preprocs=None, beta=1):
+    """
+    Evaluates the candidate sentence document against the reference
+    sentence document using the weighted longest common subseuquence
+    ROUGE evaluation routine.
 
+    :param ref
+        The reference summary.
+    
+    :param can
+        The candidate summary.
 
-def rouge_s(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1):
+    :param weight_f
+        The weight function used to attribute a score for longer
+        contiguous sequences. This should have the property that
+        for any, or most, integers x, y, f(x + y) > f(x) + f(y)
+    
+    :param inv_weight_f
+        The inverse of `weight_f`.
+    
+    :param tokenizer
+        A callable object used to transform strings into word-like
+        tokens.
+    
+    :param preprocs
+        Preprocessor callable objects that perform operations on the
+        tokens after the document has been tokenized.
+    
+    :param beta
+        The beta constant used to compute the F-measure.
+
+    :return
+        (<float:recall>, <float:precision>, <float:f-measure>)
+    """
+    if not callable(weight_f) or not callable(inv_weight_f):
+        raise ValueError("weight_f and inv_weight_f functions must be specified and callable objects.")
+
     r_tokens, c_tokens = _rouge_prepare(
         { "reference": ref, "candidate": can },
         tokenizer=tokenizer,
         preprocs=preprocs
     )
+
+    wlcs_result = _wlcs_sequence_length(r_tokens, c_tokens, weight_f)
+    R = inv_weight_f(wlcs_result / weight_f(len(ref)))
+    P = inv_weight_f(wlcs_result / weight_f(len(can)))
+    F = (1 + beta * beta) * R * P / (R + beta * beta * P)
+    return R, P, F
+
+
+def rouge_su(ref, can, tokenizer=word_tokenize, preprocs=None, sodm=None, beta=1):
+    """
+    Evaluates the candidate document against the reference document
+    using the skip bigram ROUGE evaluation routine with the start of
+    document mark extension.
+
+    :param ref
+        The reference summary.
+    
+    :param can
+        The candidate summary.
+
+    :param tokenizer
+        A callable object used to transform strings into word-like
+        tokens.
+    
+    :param preprocs
+        Preprocessor callable objects that perform operations on the
+        tokens after the document has been tokenized.
+    
+    :param beta
+        The beta constant used to compute the F-measure.
+
+    :return
+        (<float:recall>, <float:precision>, <float:f-measure>)
+    """
+    r_tokens, c_tokens = _rouge_prepare(
+        { "reference": ref, "candidate": can },
+        tokenizer=tokenizer,
+        preprocs=preprocs
+    )
+    if sodm is not None:
+        r_tokens.add(str(sodm))
+        c_tokens.add(str(sodm))
 
     r_size = len(r_tokens)
     c_size = len(c_tokens)
@@ -287,3 +598,31 @@ def rouge_s(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1):
     P = matched_skip_grams / _C(c_size, 2)
     F = (1 + beta * beta) * R * P / (R + beta * beta * P)
     return R, P, F
+
+
+def rouge_s(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1):
+    """
+    Evaluates the candidate document against the reference document
+    using the skip bigram ROUGE evaluation routine.
+
+    :param ref
+        The reference summary.
+    
+    :param can
+        The candidate summary.
+
+    :param tokenizer
+        A callable object used to transform strings into word-like
+        tokens.
+    
+    :param preprocs
+        Preprocessor callable objects that perform operations on the
+        tokens after the document has been tokenized.
+    
+    :param beta
+        The beta constant used to compute the F-measure.
+
+    :return
+        (<float:recall>, <float:precision>, <float:f-measure>)
+    """
+    return rouge_su(ref, can, tokenizer, preprocs, "<s>", beta)
