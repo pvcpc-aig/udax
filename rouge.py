@@ -42,10 +42,13 @@ def _lcs_sequence_length(X, Y, traceback=False):
         if i < 0 or j < 0:
             return []
 
-        nonlocal X, table, _query
+        nonlocal X, Y, table, _query
         current, top, left, top_left = _query(i, j)
+        if current == 0:
+            return []
 
-        if current > top and current > left:
+        table[i][j] = 0
+        if X[i] == Y[j]:
             char = X[i]
             rest = _trace_back(i - 1, j - 1)
             if len(rest) == 0:
