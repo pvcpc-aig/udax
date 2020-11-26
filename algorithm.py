@@ -197,3 +197,39 @@ def lcsubstring(A, B, traceback=True):
             traceback.append(_traceback(Ti, Tj))
         return traceback, maxlen
     return maxlen
+
+
+def comb(A, n, i=0):
+    """
+    An iterating function that yields a tuple of size `n` for each
+    combination of elements in sequence `A`. The combinations are 
+    guaranteed to be stable, i.e., each element in every tuple will
+    be arranged in their apparent order.
+
+    :param A
+        The sequence whose elements to traverse as combinations.
+    
+    :param n
+        The size of each combination tuple.
+
+    :param i
+        The starting point in the sequence.
+    
+    :yield
+        The next combination tuple.
+    """
+    # verification
+    if not isinstance(A, Sequence):
+        raise ValueError("Sequence A must be of Sequence type")
+
+    if n < 1:
+        return
+    elif n == 1:
+        while i < len(A):
+            yield (A[i],)
+            i += 1
+    else:
+        while i <= len(A) - n:
+            for c in comb(A, n-1, i+1):
+                yield (A[i], *c)
+            i += 1
