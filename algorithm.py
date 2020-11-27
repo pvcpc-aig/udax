@@ -233,3 +233,20 @@ def comb(A, n, i=0):
             for c in comb(A, n-1, i+1):
                 yield (A[i], *c)
             i += 1
+
+
+def blocks(A, size=1, stride=1):
+    """
+    An iterating function that yields `size`-sized tuples of
+    consecutive blocks from sequence `A`. The `stride` specifies
+    how many eleme
+    """
+    if stride <= 0:
+        raise ValueError("stride must be >= 1")
+    if size > len(A):
+        raise ValueError("size must be <= len(A)")
+
+    i = 0
+    while i <= len(A) - size:
+        yield tuple(A[i:i+size])
+        i += stride

@@ -1,631 +1,349 @@
 """
-An implementation of the Recall Oriented Understudy for Gisting
-Evaluation. The original paper by Chin-Yew Lin is found at
+Implementation of the ROUGE evaluation system as described by
 https://www.aclweb.org/anthology/W04-1013.pdf
 """
-from io import IOBase
-from math import factorial
-from array import array
-from pathlib import PurePath, Path
-from collections.abc import Iterable, Sequence
+import math
+from enum import Enum
+from pathlib import PurePath
 
-from nltk.stem import SnowballStemmer
-from nltk.tokenize import sent_tokenize, word_tokenize
+import udax.algorithm as algo
+import udax.statistics as stat
 
 
-# --- Utilities: General -----------------------------------------------
-def _lcs_sequence_length(X, Y, traceback=False):
-    if len(X) == 0 or len(Y) == 0:
-        return 0
+class Score:
 
-    # a len(Y) by len(X) table of lengths
-    table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
-
-    def _query(i, j):
-        nonlocal table
-        return (
-            table[i][j],
-            0 if i == 0 else table[i-1][j],
-            0 if j == 0 else table[i][j-1],
-            0 if i == 0 or j == 0 else table[i-1][j-1]
+    @staticmethod
+    def average(*scores, scorelist=None):
+        if scorelist is None:
+            scorelist = []
+        scorelist.extend(scores)
+        avg_recall    = 0
+        avg_precision = 0
+        avg_f_score   = 0
+        for x in scorelist:
+            avg_recall    += x.recall
+            avg_precision += x.precision
+            avg_f_score   += x.f_score
+        return Score(
+            avg_recall    / len(scorelist), 
+            avg_precision / len(scorelist), 
+            avg_f_score   / len(scorelist)
         )
 
-    for i, x in enumerate(X):
-        for j, y in enumerate(Y):
-            _, top, left, top_left = _query(i, j)
-            if x == y:
-                table[i][j] = top_left + 1
-            else:
-                table[i][j] = max(top, left)
+    def __init__(self, recall, precision, f_score):
+        self.recall    = recall
+        self.precision = precision
+        self.f_score   = f_score
     
-    def _trace_back(i, j):
-        if i < 0 or j < 0:
-            return []
-
-        nonlocal X, Y, table, _query
-        current, top, left, top_left = _query(i, j)
-        if current == 0:
-            return []
-
-        table[i][j] = 0
-        if X[i] == Y[j]:
-            char = X[i]
-            rest = _trace_back(i - 1, j - 1)
-            if len(rest) == 0:
-                return [ [ char ] ]
-            else:
-                return [ [ *x, char ] for x in rest ]
-        elif top > left:
-            return _trace_back(i - 1, j)
-        elif left > top:
-            return _trace_back(i, j - 1)
-        else:
-            rest_top = _trace_back(i - 1, j)
-            rest_left = _trace_back(i, j - 1)
-            return [ *rest_top, *rest_left ]
-    
-    if traceback:
-        return _trace_back(len(X) - 1, len(Y) - 1), table[-1][-1]
-
-    return table[-1][-1]
+    def __repr__(self):
+        return "R: %.3f, P: %.3f, F: %.3f" % (self.recall, self.precision, self.f_score)
 
 
-def _wlcs_sequence_length(X, Y, weight_f):
-    if not callable(weight_f):
-        raise ValueError("weight_f function must be specified")
+class Report:
 
-    # the two tables used in the algorithm specified by the paper
-    w_table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
-    c_table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
+    def __init__(self, name, score, opaque=None):
+        """
+        :param name
+            The name of the candidate document.
+        
+        :param score
+            A `Score` object as described above.
+        
+        :param opaque
+            Any object containing more specific data.
+        """
+        self.name = name
+        self.score = score
+        self.opaque = opaque
 
-    def _query(table, i, j):
-        return (
-            table[i][j],
-            0 if i == 0 else table[i - 1][j],
-            0 if j == 0 else table[i][j - 1],
-            0 if i == 0 or j == 0 else table[i - 1][j - 1]
-        )
+    def __repr__(self):
+        return "Candidate: %s, Score(%s)" % (self.name, repr(self.score))
 
-    for i, x in enumerate(X):
-        for j, y in enumerate(Y):
-            if x == y:
-                _, _, _, k = _query(w_table, i, j)
-                _, _, _, l = _query(c_table, i, j)
-                c_table[i][j] = l + weight_f(k + 1) - weight_f(k)
-                w_table[i][j] = k + 1
-            else:
-                _, top, left, _ = _query(c_table, i, j)
-                if top > left:
-                    c_table[i][j] = top
+
+class Document:
+
+    def __init__(self, name, content):
+        self.name = name
+        self.content = content
+
+
+class Task:
+
+    @staticmethod
+    def autodocs(*sources, **named_sources):
+        documents = []
+        for name, source in [ *enumerate(sources), *named_sources.items() ]:
+            try:
+                content = None
+                if isinstance(source, str):
+                    if source.startswith("file:"):
+                        content = open(source[5:], mode="r").read()
+                    else:
+                        content = source
+                elif isinstance(source, PurePath):
+                    content = source.open(mode="r").read()
+                elif isinstance(source, IOBase):
+                    content = source.read()
+                elif isinstance(source, Iterable):
+                    documents.extend(autodocs(*source))
+                    continue # continue to avoid adding null content to list
                 else:
-                    c_table[i][j] = left
-    
-    return c_table[-1][-1]
+                    raise ValueError(f"Unknown source type at index {i}")
+                documents.append(Document(name, content))
+            except IOError:
+                raise IOError(f"processing source at index {i}")
+        return documents
 
+    def __init__(self, references: list, candidates: list):
+        self.ref_documents = references
+        self.ref_count     = len(self.ref_documents)
+        self.can_documents = candidates
+        self.can_count     = len(self.can_documents)
 
-def _lcs_string_length(X, Y, traceback=False):
-    if len(X) == 0 or len(Y) == 0:
-        return 0
+        if self.ref_count == 0:
+            raise ValueError("At least one reference document is required")
 
-    # a len(Y) by len(X) table of lengths
-    table = [ [ 0 for j, _ in enumerate(Y) ] for i, _ in enumerate(X) ]
-    ref = []
-    maxlen = 0
-
-    def _query(i, j):
-        nonlocal table
-        return (
-            table[i][j],
-            0 if i == 0 else table[i-1][j],
-            0 if j == 0 else table[i][j-1],
-            0 if i == 0 or j == 0 else table[i-1][j-1]
-        )
-    
-    for i, x in enumerate(X):
-        for j, y in enumerate(Y):
-            _, top, left, top_left = _query(i, j)
-            top_left_p1 = top_left + 1
-            if x == y:
-                table[i][j] = top_left_p1
-                if top_left_p1 >= maxlen:
-                    ref.append((top_left_p1, i, j))
-                    maxlen = top_left_p1
-    
-    def _trace_back(i, j):
-        nonlocal X, _query
-        result = []
-
-        k = 0
-        max_k = min(i, j)
-        while k <= max_k:
-            current, _, _, _ = _query(i - k, j - k)
-            if current <= 0:
-                break
-            result.insert(0, X[i - k])
-            k += 1
+        if self.can_count == 0:
+            raise ValueError("At least one candidate document is required")
         
-        return result
 
-    if traceback:
-        results = []
-        for x in reversed(ref):
-            if x[0] < maxlen:
-                break
-            results.append(_trace_back(x[1], x[2]))
-        return results, maxlen
-
-    return maxlen
-
-
-def _lcs(seq_a, seq_b):
-    # TODO: implement O(n^2) with dynprog instead of the O(n^3) solution now
-    # TODO: the paper uses LCS that allows sub-sequences to not be 
-    # contiguous :mad_emoji:; fix that
-    #   WAIT- the paper uses this algorithm (but with dynprog) for WLCS :thinking:
-    """
-    :return
-        (<int:a-index>, <int:b-index>, <int:length>)
-    """
-    if not isinstance(seq_a, Sequence) or \
-       not isinstance(seq_b, Sequence):
-        return None
-
-    sz_a = len(seq_a)
-    sz_b = len(seq_b)
-
-    a_index = 0
-    b_index = 0
-    length = 0
-
-    i = 0
-    while i < sz_a:
-        j = 0
-        while j < sz_b:
-            k = 0
-            m = min(sz_a - i, sz_b - j)
-            while k < m and seq_a[i + k] == seq_b[j + k]:
-                k += 1
-            if k > length:
-                a_index = i
-                b_index = j
-                length = k
-            j += 1
-        i += 1
-    return a_index, b_index, length
-
-
-def _iterate_combinations(seq, start=0, size=1):
-    i = start
-    if size == 1:
-        while i < len(seq):
-            yield (seq[i],)
-            i += 1
-    else:
-        while i <= len(seq) - size:
-            item = seq[i]
-            for c in _iterate_combinations(seq, start=i+1, size=size-1):
-                yield (item, *c)
-            i += 1
-
-
-def _iterate_grams(seq, start=0, size=1, skip=1):
-    i = start
-    while i <= len(seq) - size:
-        yield tuple(seq[i:i+size])
-        i += skip
-
-
-def _P(n, r):
-    result = 1
-    while n > r:
-        result *= n
-        n -= 1
-    return result
-
-
-def _C(n, r):
-    d = n - r
-    if r > d:
-        return _P(n, r) // factorial(d)
-    else:
-        return _P(n, d) // factorial(r)
-
-
-# --- Utilities: Loading & Pre-processing ------------------------------
-def _get_string_content(named_sources, include_name_list=True):
-    """
-    Iterates a dictionary of named document sources and loads in their
-    content. The document values may be any of the following:
-
-        - String:    the string itself,
-        - Path-like: the content of the file it points to,
-        - IO-like:   the content of the IO stream,
-        - Iterable:  the concatenated __str__ of the objects,
-
-    If the documents are not one of those types, a ValueError is raised.
-
-    :param named_sources
-        A dictionary of documents to load whose names are given by
-        their key in the dictionary.
+def n(task, word_tokenizer, N=1, jackknife=True, beta=1):
+    # If multiple candidates are specified, multiple reports
+    # are generated.
+    if len(task.can_documents) > 1:
+        reports = []
+        for can in task.can_documents:
+            ntask = Task(task.ref_documents, [ can ])
+            reports.append(
+                n(ntask, word_tokenizer, N, jackknife, beta))
+        return reports
     
-    :param include_name_list
-        Option dictating whether to include the list of names for each
-        document received in the dictionary.
+    # We are now guaranteed to have a single candidate document
+    candidate = task.can_documents[0]
 
-    :return
-        (<bool:success>, <str:report>, [<list:names>,] <list:result>)
-    """
-    names = []
-    loaded = []
-    for name, source in named_sources.items():
-        try:
-            if isinstance(source, str):
-                loaded.append(source)
-            elif isinstance(source, PurePath):
-                loaded.append(source.open(mode="r").read())
-            elif isinstance(source, IOBase):
-                loaded.append(source.read())
-            elif isinstance(source, Iterable):
-                loaded.append(''.join([ str(x) for x in source ]))
+    if task.ref_count > 1 and jackknife:
+        reports = []
+        for refs in algo.comb(task.ref_documents, task.ref_count - 1):
+            ntask = Task(list(refs), task.can_documents)
+            reports.append(
+                n(ntask, word_tokenizer, N, False, beta))
+        return Report(candidate.name, Score.average(scorelist=[ x.score for x in reports ]))
+    
+    can_tokens = word_tokenizer(candidate.content)
+    can_blocks = 1 + len(can_tokens) - N
+
+    max_report = None
+    for reference in task.ref_documents:
+        ref_tokens = word_tokenizer(reference.content)
+        ref_blocks = 1 + len(ref_tokens) - N
+        ref_grams = dict()
+        for gram in algo.blocks(ref_tokens, size=N):
+            if gram not in ref_grams:
+                ref_grams[gram] = 1
             else:
-                return False, f"unknown source '{name}' type {type(source)}", None
-            names.append(str(name))
-        except TypeError as e: # string join failed
-            return False, f"iterable source '{name}' is not homogeneous", None
-        except IOError as e: # reading a stream source
-            return False, f"stream/file source '{name}' is not homogeneous", None
-    if include_name_list:
-        return True, None, names, loaded
-    return True, None, loaded
+                ref_grams[gram] += 1
         
-
-def _rouge_prepare(named_documents, tokenizer=word_tokenize, preprocs=None, include_raw_content=False):
-    """
-    A function wrapping common routines to extract content from documents
-    to be evaluated by any of the ROUGE functions.
-
-    :param named_documents
-        The dictionary of named documents; see `_get_string_content(...)`
-    
-    :param tokenizer
-        The word tokenizer to use when splitting the document sources
-        into individual tokens. 
-
-        NOTE: the tokenizer *always* runs before the `preprocs`.
-    
-    :param preprocs
-        An iterable of callable objects that perform additional preprocessing
-        steps on the tokenized data. The preprocessors are executed in the
-        order in which they are iterated.
-
-    :return
-        If include_raw_content is true, the original content string list
-        and the processed tokens are returned in a tuple.
-            ([r1, r2, r3, ...], [p1, p2, p3, ...])
+        ref_matches = 0
+        can_matches = 0
+        for gram in algo.blocks(can_tokens, size=N):
+            if gram in ref_grams:
+                can_matches += 1
+                if ref_grams[gram] > 0:
+                    ref_matches += 1
+                    ref_grams[gram] -= 1
         
-        Otherwise, the list of processed tokens is returned.
-            [p1, p2, p3, ...]
-    """
-    # validate params
-    if not callable(tokenizer):
-        raise ValueError("a callable tokenizer object must be specified")
-
-    # prepare the documents, i.e. tokenize and preprocess them
-    success, report, loaded = _get_string_content(named_documents, include_name_list=False)
-    if not success:
-        raise ValueError(f"failed to load content: {report}")
-
-    if preprocs is None: # initialize empty list for convenience
-        preprocs = []
-
-    prepared = []
-    for content in loaded:
-        tokens = tokenizer(content)
-        for preproc in preprocs:
-            if not callable(preproc):
-                raise ValueError(f"pre-processor at index {i} is not a callable object")
-            tokens = preproc(tokens)
-        prepared.append(tokens)
-    if include_raw_content:
-        return loaded, prepared
-    return prepared
+        R = ref_matches / ref_blocks
+        P = can_matches / can_blocks
+        F = stat.f_score(R, P, beta)
+        score = Score(R, P, F)
+        # and by the specification we take the "maximum" of the
+        # reports. I will assume here that it means the highest
+        # f-score.
+        if max_report is None or max_report.score.f_score < score.f_score:
+            max_report = Report(candidate.name, score)
+    return max_report
 
 
-# --- Interface --------------------------------------------------------
-def rouge_n(ref, can, tokenizer=word_tokenize, preprocs=None, n=1, beta=1):
-    # TODO: implement Jackknifing option
-    """
-    Evaluates the candidate document against the reference document
-    using the n-gram ROUGE evaluation routine.
+class LCSMode(Enum):
+    SENTENCE = 0
+    SUMMARY  = 1
 
-    :param ref
-        The reference summary.
+
+def wlcs(task, sent_tokenizer, word_tokenizer, weight_f=lambda x: x * x, inv_weight_f=lambda x: math.sqrt(x), lcsmode=LCSMode.SENTENCE, jackknife=True, beta=1):
+    # If multiple candidates are specified, multiple reports
+    # are generated.
+    if len(task.can_documents) > 1:
+        reports = []
+        for can in task.can_documents:
+            ntask = Task(task.ref_documents, [ can ])
+            reports.append(
+                wlcs(ntask, sent_tokenizer, word_tokenizer, weight_f, inv_weight_f, lcsmode, jackknife, beta))
+        return reports
+
+    # We are now guaranteed to have a single candidate document
+    candidate = task.can_documents[0]
+
+    if task.ref_count > 1 and jackknife:
+        reports = []
+        for refs in algo.comb(task.ref_documents, task.ref_count - 1):
+            ntask = Task(list(refs), task.can_documents)
+            reports.append(
+                wlcs(ntask, sent_tokenizer, word_tokenize, weight_f, inv_weight_f, lcsmode, False, beta))
+        return Report(candidate.name, Score.average(scorelist=[ x.score for x in reports ]))
     
-    :param can
-        The candidate summary.
+    if LCSMode.SENTENCE == lcsmode: # --- SENTENCE -----------------------------
+        can_tokens = word_tokenizer(candidate.content)
+        max_report = None
+        for reference in task.ref_documents:
+            ref_tokens = word_tokenizer(reference.content)
+
+            wlcs_score = algo.wlcsubsequence(ref_tokens, can_tokens, weight_f, traceback=False)
+            R = inv_weight_f(wlcs_score / weight_f(len(ref_tokens)))
+            P = inv_weight_f(wlcs_score / weight_f(len(can_tokens)))
+            F = stat.f_score(R, P, beta)
+            score = Score(R, P, F)
+            # and by the specification we take the "maximum" of the
+            # reports. I will assume here that it means the highest
+            # f-score.
+            if max_report is None or max_report.score.f_score < score.f_score:
+                max_report = Report(candidate.name, score)
+        return max_report
+    elif LCSMode.SUMMARY == lcsmode: # --- SUMMARY -----------------------------
+        can_tokens = word_tokenizer(candidate.content)
+        max_report = None
+        for reference in task.ref_documents:
+            ref_tokens = word_tokenizer(reference.content)
+            common_tokens = set()
+            common_tokens_score = 0
+            for ref_sentence in sent_tokenizer(reference.content):
+                ref_sent_tokens = word_tokenizer(ref_sentence)
+                traceback, wlcs_score = algo.wlcsubsequence(ref_sent_tokens, can_tokens, weight_f)
+                for trace in traceback:
+                    common_tokens.update(*traceback)
+                    common_tokens_score += wlcs_score
+
+            if common_tokens_score == 0:
+                return Report(candidate.name, Score(0, 0, 0), False)
+            
+            lcsu_score = len(common_tokens) / common_tokens_score
+            R = lcsu_score / len(ref_tokens)
+            P = lcsu_score / len(can_tokens)
+            F = stat.f_score(R, P, beta)
+            score = Score(R, P, F)
+            # and by the specification we take the "maximum" of the
+            # reports. I will assume here that it means the highest
+            # f-score.
+            if max_report is None or max_report.score.f_score < score.f_score:
+                max_report = Report(candidate.name, score, True)
+        return max_report
+    else:
+        raise ValueError(f"Unrecognized LCSMode {lcsmode}")
+
+
+def lcs(task, sent_tokenizer, word_tokenizer, lcsmode=LCSMode.SENTENCE, jackknife=True, beta=1):
+    weight_f = lambda x: x
+    inv_weight_f = lambda y: y
+    return wlcs(task, sent_tokenize, word_tokenize, weight_f, inv_weight_f, lcsmode, jackknife, beta)
+
+
+def su(task, word_tokenizer, N=2, sodm="<s>", jackknife=True, beta=1):
+    # If multiple candidates are specified, multiple reports
+    # are generated.
+    if len(task.can_documents) > 1:
+        reports = []
+        for can in task.can_documents:
+            ntask = Task(task.ref_documents, [ can ])
+            reports.append(
+                su(ntask, word_tokenizer, N, sodm, jackknife, beta))
+        return reports
     
-    :param tokenizer
-        A callable object used to transform strings into word-like
-        tokens.
+    # We are now guaranteed to have a single candidate document
+    candidate = task.can_documents[0]
+
+    if task.ref_count > 1 and jackknife:
+        reports = []
+        for refs in algo.comb(task.ref_documents, task.ref_count - 1):
+            ntask = Task(list(refs), task.can_documents)
+            reports.append(
+                su(ntask, word_tokenize, N, sodm, False, beta))
+        return Report(candidate.name, Score.average(scorelist=[ x.score for x in reports ]))
     
-    :param preprocs
-        Preprocessor callable objects that perform operations on the
-        tokens after the document has been tokenized.
-    
-    :return
-        (<float:recall>, <float:precision>, <float:f-measure>)
-    """
-    r_tokens, c_tokens = _rouge_prepare(
-        { "reference": ref, "candidate": can },
-        tokenizer=tokenizer,
-        preprocs=preprocs
-    )
-    
-    r_size = len(r_tokens)
-    c_size = len(c_tokens)
-    if r_size == 0:
-        raise ValueError("reference document does not have any content")
-    if c_size == 0:
-        raise ValueError("candidate document does not have any content")
-    if n > min(r_size, c_size):
-        raise ValueError(f"n must be <= min(r_size = {r_size}, c_size = {c_size})")
-
-    # build the collection of reference n-grams
-    r_total = 1 + len(r_tokens) - n
-    r_grams = {}
-    for gram in _iterate_grams(r_tokens, size=n):
-        if gram not in r_grams:
-            r_grams[gram] = 1
-        else:
-            r_grams[gram] += 1
-    
-    # iterate and compare with the candidate summary
-    c_total = 1 + len(c_tokens) - n
-    c_matched = 0
-    for gram in _iterate_grams(c_tokens, size=n):
-        if gram in r_grams and r_grams[gram] > 0:
-            c_matched += 1
-            r_grams[gram] -= 1
-    
-    # compute statistics and finish
-    R = c_matched / r_total
-    P = c_matched / c_total
-    F = (1 + beta * beta) * R * P / (R + beta * beta * P)
-    return R, P, F
-
-
-def rouge_lcs_sentence(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1):
-    """
-    Evaluates the candidate sentence document against the reference
-    sentence document using the longest common subsequence ROUGE
-    evaluation routine.
-
-    This differs from `rouge_lcs_summary` by using a slightly altered
-    algorithm on sentences rather than on summaries.
-
-    :param ref
-        The reference summary.
-    
-    :param can
-        The candidate summary.
-    
-    :param tokenizer
-        A callable object used to transform strings into word-like
-        tokens.
-    
-    :param preprocs
-        Preprocessor callable objects that perform operations on the
-        tokens after the document has been tokenized.
-    
-    :return
-        (<float:recall>, <float:precision>, <float:f-measure>)
-    """
-    r_tokens, c_tokens = _rouge_prepare(
-        { "reference": ref, "candidate": can },
-        tokenizer=tokenizer,
-        preprocs=preprocs
-    )
-
-    length = _lcs_sequence_length(r_tokens, c_tokens)
-    R = length / len(r_tokens)
-    P = length / len(c_tokens)
-    F = (1 + beta * beta) * R * P / (R + beta * beta * P)
-    return R, P, F
-
-
-def rouge_lcs_summary(ref, can, sent_tokenizer=sent_tokenize, tokenizer=word_tokenize, preprocs=None, beta=1):
-    """
-    Evaluates the candidate summary document against the reference
-    summary document using the longest common subsequence ROUGE
-    evaluation routine.
-
-    This differs from `rouge_lcs_sentence` by using a slightly altered
-    algorithm on summaries rather than on sentences.
-
-    :param ref
-        The reference summary.
-    
-    :param can
-        The candidate summary.
-    
-    :param sent_tokenizer
-        A callable object used to transform strings into sentence-like
-        tokens.
-    
-    :param tokenizer
-        A callable object used to transform strings into word-like
-        tokens.
-    
-    :param preprocs
-        Preprocessor callable objects that perform operations on the
-        tokens after the document has been tokenized.
-    
-    :return
-        (<float:recall>, <float:precision>, <float:f-measure>)
-    """
-    if not callable(sent_tokenizer):
-        raise ValueError("a callable sent_tokenizer object must be specified")
-
-    r_data, c_data = _rouge_prepare(
-        { "reference": ref, "candidate": can },
-        tokenizer=tokenizer,
-        preprocs=preprocs,
-        include_raw_content=True
-    )
-    r_content, r_tokens = r_data
-    c_content, c_tokens = c_data
-
-    # TODO: is this algorithm correct? LCS_u is a bit ambiguous in the paper
-    common_tokens = set()
-    common_tokens_total = 0
-    for i, ref_sent in enumerate(sent_tokenizer(r_content)):
-        r_sent_tokens, = _rouge_prepare(
-            { f"reference_{i}": ref_sent },
-            tokenizer=tokenizer,
-            preprocs=preprocs
-        )
-        traceback, length = _lcs_sequence_length(r_sent_tokens, c_tokens, traceback=True)
-        if lcs_result is None:
-            raise ValueError("documents have not be tokenized into a sequence of tokens")
-
-        common_tokens.update(*traceback)
-        common_tokens_total += length
-
-    if common_tokens_total == 0:
-        return None, None
-
-    lcsu_score = len(common_tokens) / common_tokens_total
-    R = lcsu_score / len(r_tokens)
-    P = lcsu_score / len(c_tokens)
-    F = (1 + beta * beta) * R * P / (R + beta * beta * P)
-    return R, P, F
-
-
-def rouge_wlcs_sentence(ref, can, weight_f, inv_weight_f, tokenizer=word_tokenize, preprocs=None, beta=1):
-    """
-    Evaluates the candidate sentence document against the reference
-    sentence document using the weighted longest common subseuquence
-    ROUGE evaluation routine.
-
-    :param ref
-        The reference summary.
-    
-    :param can
-        The candidate summary.
-
-    :param weight_f
-        The weight function used to attribute a score for longer
-        contiguous sequences. This should have the property that
-        for any, or most, integers x, y, f(x + y) > f(x) + f(y)
-    
-    :param inv_weight_f
-        The inverse of `weight_f`.
-    
-    :param tokenizer
-        A callable object used to transform strings into word-like
-        tokens.
-    
-    :param preprocs
-        Preprocessor callable objects that perform operations on the
-        tokens after the document has been tokenized.
-    
-    :param beta
-        The beta constant used to compute the F-measure.
-
-    :return
-        (<float:recall>, <float:precision>, <float:f-measure>)
-    """
-    if not callable(weight_f) or not callable(inv_weight_f):
-        raise ValueError("weight_f and inv_weight_f functions must be specified and callable objects.")
-
-    r_tokens, c_tokens = _rouge_prepare(
-        { "reference": ref, "candidate": can },
-        tokenizer=tokenizer,
-        preprocs=preprocs
-    )
-
-    wlcs_result = _wlcs_sequence_length(r_tokens, c_tokens, weight_f)
-    R = inv_weight_f(wlcs_result / weight_f(len(ref)))
-    P = inv_weight_f(wlcs_result / weight_f(len(can)))
-    F = (1 + beta * beta) * R * P / (R + beta * beta * P)
-    return R, P, F
-
-
-def rouge_su(ref, can, tokenizer=word_tokenize, preprocs=None, sodm=None, beta=1):
-    """
-    Evaluates the candidate document against the reference document
-    using the skip bigram ROUGE evaluation routine with the start of
-    document mark extension.
-
-    :param ref
-        The reference summary.
-    
-    :param can
-        The candidate summary.
-
-    :param tokenizer
-        A callable object used to transform strings into word-like
-        tokens.
-    
-    :param preprocs
-        Preprocessor callable objects that perform operations on the
-        tokens after the document has been tokenized.
-    
-    :param beta
-        The beta constant used to compute the F-measure.
-
-    :return
-        (<float:recall>, <float:precision>, <float:f-measure>)
-    """
-    r_tokens, c_tokens = _rouge_prepare(
-        { "reference": ref, "candidate": can },
-        tokenizer=tokenizer,
-        preprocs=preprocs
-    )
+    can_tokens = word_tokenizer(candidate.content)
     if sodm is not None:
-        r_tokens.add(str(sodm))
-        c_tokens.add(str(sodm))
+        can_tokens.insert(0, sodm)
+    can_skips = stat.comb(len(can_tokens), N)
 
-    r_size = len(r_tokens)
-    c_size = len(c_tokens)
-    r_skip_grams = set()
-    for gram in _iterate_combinations(r_tokens):
-        r_skip_grams.add(gram)
-    
-    matched_skip_grams = 0
-    for gram in _iterate_combinations(c_tokens):
-        if gram in r_skip_grams:
-            matched_skip_grams += 1
-    
-    R = matched_skip_grams / _C(r_size, 2)
-    P = matched_skip_grams / _C(c_size, 2)
-    F = (1 + beta * beta) * R * P / (R + beta * beta * P)
-    return R, P, F
+    max_report = None
+    for reference in task.ref_documents:
+        ref_tokens = word_tokenizer(reference.content)
+        if sodm is not None:
+            ref_tokens.insert(0, sodm)
+        ref_skips = stat.comb(len(ref_tokens), N)
+
+        ref_grams = dict()
+        for gram in algo.comb(ref_tokens, N):
+            if gram not in ref_grams:
+                ref_grams[gram] = 1
+            else:
+                ref_grams[gram] += 1
+        
+        ref_matches = 0
+        can_matches = 0
+        for gram in algo.comb(can_tokens, N):
+            if gram in ref_grams:
+                can_matches += 1
+                if ref_grams[gram] > 0:
+                    ref_matches += 1
+                    ref_grams[gram] -= 1
+
+        R = ref_matches / ref_skips
+        P = can_matches / can_skips
+        F = stat.f_score(R, P, beta)
+        score = Score(R, P, F)
+        # and by the specification we take the "maximum" of the
+        # reports. I will assume here that it means the highest
+        # f-score.
+        if max_report is None or max_report.score.f_score < score.f_score:
+            max_report = Report(candidate.name, score)
+    return max_report
 
 
-def rouge_s(ref, can, tokenizer=word_tokenize, preprocs=None, beta=1):
-    """
-    Evaluates the candidate document against the reference document
-    using the skip bigram ROUGE evaluation routine.
+def s(task, word_tokenizer, N=2, jackknife=True, beta=1):
+    return su(task, word_tokenizer, N, None, jackknife, beta)
 
-    :param ref
-        The reference summary.
-    
-    :param can
-        The candidate summary.
 
-    :param tokenizer
-        A callable object used to transform strings into word-like
-        tokens.
-    
-    :param preprocs
-        Preprocessor callable objects that perform operations on the
-        tokens after the document has been tokenized.
-    
-    :param beta
-        The beta constant used to compute the F-measure.
-
-    :return
-        (<float:recall>, <float:precision>, <float:f-measure>)
-    """
-    return rouge_su(ref, can, tokenizer, preprocs, "<s>", beta)
+# -- testing --
+# task = Task(
+#     Task.autodocs(
+#         "file:vendor/rouge-2.0/v1.2.2/projects/test-summarization/reference/task1_englishReference1.txt",
+#         "file:vendor/rouge-2.0/v1.2.2/projects/test-summarization/reference/task1_englishReference2.txt"),
+#     Task.autodocs(
+#         "file:vendor/rouge-2.0/v1.2.2/projects/test-summarization/system/task1_englishSyssum1.txt",
+#         "file:vendor/rouge-2.0/v1.2.2/projects/test-summarization/system/task1_englishSyssum2.txt"))
+# 
+# from nltk.tokenize import sent_tokenize, word_tokenize
+# 
+# ROUGE-N
+# for report in n(task, word_tokenize):
+#     print(report)
+# 
+# ROUGE-LCS
+# for report in lcs(task, sent_tokenize, word_tokenize):
+#     print(report)
+# print('----')
+# for report in lcs(task, sent_tokenize, word_tokenize, LCSMode.SUMMARY):
+#     print(report)
+# 
+# ROUGE-WLCS
+# for report in wlcs(task, sent_tokenize, word_tokenize):
+#     print(report)
+# print('----')
+# for report in wlcs(task, sent_tokenize, word_tokenize, LCSMode.SUMMARY):
+#     print(report)
+# 
+# ROUGE-S
+# for report in s(task, word_tokenize, 4):
+#     print(report)
+# print('---')
+# for report in su(task, word_tokenize, 4):
+#     print(report)
