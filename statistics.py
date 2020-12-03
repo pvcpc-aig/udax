@@ -81,5 +81,7 @@ def f_score(recall, precision, beta=1):
     :return
         <float:f-score>
     """
+    if precision == 0 or recall == 0:
+        return 0
     beta_2 = beta * beta
     return (1 + beta_2) * precision * recall / (beta_2 * precision + recall)

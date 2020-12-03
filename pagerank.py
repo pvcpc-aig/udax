@@ -356,20 +356,58 @@ def pagerank(damp=0.85):
 	return _pagerank
 
 
-# --- Utilities --------------------------------------------------------
-def similarity(i, j):
-	"""
-	Computes the similarity between sequences `i` and `j` using the
-	formula specified in the TextRank paper.
-	"""
-	from math import log10
-	if len(i) == 0 and len(j) == 0:
-		return 0
-	
-	j_data = set(j)
-	sim_count = 0
-	for x in i:
-		if x in j_data:
-			sim_count += 1
+# --- Algorithms -------------------------------------------------------
+def similarity():
+	def _similarity(i, j):
+		"""
+		Computes the similarity between sequences `i` and `j` using the
+		formula specified in the TextRank paper.
+		"""
+		from math import log10
+		if len(i) == 0 or len(j) == 0:
+			return 0
 
-	return sim_count / (log10(len(i)) + log10(len(j)))
+		if len(i) == 1 and len(j) == 1:
+			if i[0] == j[0]:
+				return 1
+			return 0
+		
+		j_data = set(j)
+		sim_count = 0
+		for x in i:
+			if x in j_data:
+				sim_count += 1
+
+		return sim_count / (log10(len(i)) + log10(len(j)))
+	return _similarity
+
+
+def text_similarity(tokenizer):
+	def _text_similarity(i, j):
+		"""
+		Computes the similarity between `i` and `j` strings by word
+		tokenizing and comparing overlap based on the algorithm specified
+		in the TextRank paper.
+		"""
+		nonlocal tokenizer
+		from math import log10
+
+		i_words = tokenizer(i)
+		j_words = tokenizer(j)
+		if len(i_words) == 0 or len(j_words) == 0:
+			return 0
+
+		if len(i_words) == 1 and len(j_words) == 1:
+			if i_words[0] == j_words[0]:
+				return 1
+			return 0
+
+		j_data = set(j_words)
+
+		sim_count = 0
+		for x in i_words:
+			if x in j_words:
+				sim_count += 1
+
+		return sim_count / (log10(len(i_words)) + log10(len(j_words)))
+	return _text_similarity
