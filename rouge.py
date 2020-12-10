@@ -29,6 +29,10 @@ class Score:
             avg_precision / len(scorelist), 
             avg_f_score   / len(scorelist)
         )
+    
+    @classmethod
+    def from_string(cls, representation):
+        return cls(*[ float(x) for x in representation.split(',') ])
 
     def __init__(self, recall, precision, f_score):
         self.recall    = recall
@@ -36,6 +40,9 @@ class Score:
         self.f_score   = f_score
     
     def __repr__(self):
+        return f"{self.recall},{self.precision},{self.f_score}"
+    
+    def __str__(self):
         return "R: %.3f, P: %.3f, F: %.3f" % (self.recall, self.precision, self.f_score)
 
 
@@ -209,32 +216,6 @@ def wlcs(task, sent_tokenizer, word_tokenizer, weight_f=lambda x: x * x, inv_wei
                 max_report = Report(candidate.name, score)
         return max_report
     elif LCSMode.SUMMARY == lcsmode: # --- SUMMARY -----------------------------
-        # can_tokens = word_tokenizer(candidate.content)
-        # max_report = None
-        # for reference in task.ref_documents:
-        #     ref_tokens = word_tokenizer(reference.content)
-        #     common_tokens = set()
-        #     common_tokens_score = 0
-        #     for ref_sentence in sent_tokenizer(reference.content):
-        #         ref_sent_tokens = word_tokenizer(ref_sentence)
-        #         traceback, wlcs_score = algo.wlcsubsequence(ref_sent_tokens, can_tokens, weight_f)
-        #         for trace in traceback:
-        #             common_tokens.update(*traceback)
-        #             common_tokens_score += wlcs_score
-
-        #     if common_tokens_score == 0:
-        #         return Report(candidate.name, Score(0, 0, 0), False)
-        #     
-        #     lcsu_score = len(common_tokens) / common_tokens_score
-        #     R = lcsu_score / len(ref_tokens)
-        #     P = lcsu_score / len(can_tokens)
-        #     F = stat.f_score(R, P, beta)
-        #     score = Score(R, P, F)
-        #     # and by the specification we take the "maximum" of the
-        #     # reports. I will assume here that it means the highest
-        #     # f-score.
-        #     if max_report is None or max_report.score.f_score < score.f_score:
-        #         max_report = Report(candidate.name, score, True)
         can_sentences = [ word_tokenizer(x) for x in sent_tokenizer(candidate.content) ]
         can_tokens = word_tokenizer(candidate.content)
         max_report = None

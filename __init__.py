@@ -314,7 +314,7 @@ def d_index_no_except(seq, obj, i=None, j=None):
 
 
 # +-- CSV ------------------------------------------+
-@deprecated(reason="moved to separate module", alternative="udax.csv.parseln")
+@deprecated(reason="moved to separate module", alternative="udax.csv.parse")
 def csv_parseln(
 		p_line, 
 		delim=',', 
@@ -398,7 +398,7 @@ def csv_parseln(
 	return cells
 
 
-@deprecated(reason="moved to separate module", alternative="udax.csv.mkln")
+@deprecated(reason="moved to separate module", alternative="udax.csv.render")
 def csv_mkln(
 		*args,
 		delim=',',
@@ -438,7 +438,7 @@ def csv_mkln(
 	return delim.join([_format_cell(x) for x in args])
 
 
-@deprecated(reason="moved to separate module", alternative="udax.csv.writeln")
+@deprecated(reason="moved to separate module", alternative="udax.csv.write")
 def csv_writeln(
 		*args,
 		stream=None,
