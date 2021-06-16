@@ -1,12 +1,9 @@
 import io
-import os
 import sys
 import math
 import time
 import string
-import enum
-from collections.abc import Iterable, Sequence, Mapping
-from pathlib import PurePath
+from collections.abc import Iterable
 
 
 def deprecated(since=None, reason=None, alternative=None):

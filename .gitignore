@@ -1,5 +1,5 @@
 # python/environment related ignores
 __pycache__
+build
+dist
 venv
-
-# other files/personal
