@@ -4,6 +4,154 @@ with the assistance of ANSI escape sequences.
 """
 import io
 import sys
+import enum
+
+
+def progress(progress, bounds=60, task_label=None):
+    # taskname required to be string later on
+    if not isinstance(task_label, str):
+        task_label = ''
+    progress_label = '%3.f%%' % (progress * 100)
+    bar_length = bounds - len(task_label) - len(progress_label) - 2
+    bar_string = ''   
+    if bar_length > 5:
+        inner_length = bar_length - 2
+        n_complete = int(progress * inner_length)
+        n_incomplete = inner_length - n_complete
+        bar_string = '[' + ('#' * n_complete) + (' ' * n_incomplete) + ']'
+    
+    task_label_limit = min(bounds - len(progress_label), len(task_label))
+    task_label = task_label[0:task_label_limit]
+    print(task_label + ' ' + bar_string + ' ' + progress_label + '\r', end='')
+
+
+def progress_done():
+    print()
+
+
+class TextAlign(enum.Enum):
+    LEFT = 0
+    CENTER = 1
+    RIGHT = 2
+
+    @staticmethod
+    def parse(word):
+        translation = {
+            'left': TextAlign.LEFT,
+            'center': TextAlign.CENTER,
+            'right': TextAlign.RIGHT
+        }
+        if word in translation:
+            translation[word]
+        return TextAlign.LEFT
+
+
+def render_elliptical(
+    content=None,
+    maxlength=None,
+    ellipsechar=None,
+    ellipselength=None
+):
+    # default parameters
+    if not isinstance(content, str):
+        content = ''
+    if not isinstance(ellipsechar, str) or len(ellipsechar) != 1:
+        ellipsechar = '.'
+    if not isinstance(ellipselength, int) or ellipselength < 0:
+        ellipselength = 3
+    
+    # render
+    if isinstance(maxlength, int):
+        maxlength = max(0, maxlength)
+        if len(content) < maxlength:
+            return content
+        if maxlength <= ellipselength:
+            return ellipsechar * maxlength
+        return content[0:(maxlength-ellipselength)] + (ellipsechar * ellipselength)
+
+    return content
+
+
+def render_padded(
+    content=None,
+    boxlength=None,
+    align=None,
+    padding=None
+):
+    # default parameters
+    if not isinstance(content, str):
+        content = ''
+    if not isinstance(padding, str) or len(padding) != 1:
+        padding = ' '
+    if not isinstance(align, TextAlign):
+        align = TextAlign.parse(align)
+    
+    # render
+    if isinstance(boxlength, int):
+        boxlength = max(0, boxlength)
+        if len(content) > boxlength:
+            return render_elliptical(content, boxlength)
+        
+        padlength = len(content) - boxlength
+        if align is TextAlign.LEFT:
+            return content + (padding * padlength)
+        if align is TextAlign.RIGHT:
+            return (padding * padlength) + content
+        
+        leftlength = padlength // 2
+        rightlength = 1 - leftlength
+
+        return (padding * leftlength) + content + (padding * rightlength)
+    
+    return content
+
+
+def render_bordered(
+    content=None,
+    border_left=None,
+    border_right=None
+):
+    # default parameters
+    if not isinstance(content, str):
+        content = ''
+    if not isinstance(border_left, str):
+        border_left = ''
+    if not isinstance(border_right, str):
+        border_right = ''
+
+    # render
+
+
+def render_strip(
+    content=None,
+    boxlength=None,
+    border_left=None,
+    border_right=None,
+    content_align=None,
+    padding=None,
+    *args, **kwargs
+):
+    # default parameters 
+    if not isinstance(content, str):
+        content = ''
+    if not isinstance(border_left, str):
+        border_left = ''
+    if not isinstance(border_right, str):
+        border_right = ''
+    if not isinstance(content_align, TextAlign):
+        content_align = TextAlign.parse(content_align)
+    if not isinstance(padding, str) or len(padding) != 1:
+        padding = ' '
+
+    borderlength = len(border_left) + len(border_right)
+    
+    # render
+    if isinstance(boxlength, int):
+        boxlength = max(0, boxlength)
+
+        return ...
+    
+    return border_left + content + border_right
 
 
 class Style:
