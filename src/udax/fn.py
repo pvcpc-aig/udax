@@ -1,276 +1,220 @@
 """
 Functional programming capabilities.
 """
-from collections.abc import Iterable, Sequence, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 
 
-# administrative
-class StreamConstants:
-
-    # special return item from any Operator to signal item removal
-    REMOVE = object()
-
-    # special return item from terminal Operators to signal end of stream.
-    EOS = object()
-
-
-class StreamError(RuntimeError):
-
-    def __init__(self, *args, **kwargs):
-        super(StreamError, self).__init__(*args, **kwargs)
-
-
-# operator definition
 class Operator:
 
-    def __init__(self, terminal=False):
+    def __init__(self):
         self.name = self.__class__.__name__
-        self.terminal = terminal
-        if not callable(self.__class__):
-            raise StreamError(f'{self.name} operator must implement callable')
+        self._source = iter(())
+        if '__iter__' not in dir(self.__class__):
+            raise TypeError(f'{self.name} must implement __next__')
+    
+    @property
+    def source(self):
+        return self._source
+    
+    @source.setter
+    def source(self, new):
+        if not isinstance(new, Iterable):
+            raise ValueError('Operator source must be an iterable type')
+        self._source = iter(new)
+
+    def __iter__(self):
+        return self
+    
+    def __repr__(self):
+        return self.name
+    
+    def __str__(self):
+        return self.name
 
 
-class OperatorResult:
-
-    # special result used by terminal operators to indicate end of stream.
-    EOS = object()
-
-    # special result used by any operator to ignore the result.
-    IGNORE = object()
-
-    def __init__(self, single=None, multiple=None):
-        self.single = single
-        self.multiple = multiple
-
-
-class OperatorChain:
-
-    @staticmethod
-    def verify_oplist(oplist):
-        if not isinstance(oplist, Sequence):
-            raise StreamError('oplist must be a sequence of fn.Operator objects')
-
-        invalid = list(filter(lambda x: not isinstance(x, Operator), oplist))
-
-        if len(invalid) > 0:
-            raise StreamError(
-                'following do not adhere to fn.Operator spec: ' + ', '.join(invalid))
-
-    @staticmethod
-    def parse_oplist(oplist):
-        # verify the list only contains valid operators
-        OperatorChain.verify_oplist(oplist)
-
-        # continue to find all operator chains
-        i = 0
-        limit = len(oplist)
-        chain = []
-        while i < limit:
-            # parse single operator chain
-            functions = []
-            terminal = None
-            while i < limit:
-                op = oplist[i]
-                i += 1
-                if op.terminal:
-                    terminal = op
-                    break
-                functions.append(op)
-            chain.append(OperatorChain(functions, terminal))
-        
-        return chain
-
-    def __init__(self, functions=None, terminal=None):
-        self.functions = functions if isinstance(functions, Iterable) else []
-        self.terminal = terminal if terminal is not None else Collect()
-
-
-# terminal operators
 class Collect(Operator):
 
     def __init__(self):
-        super(Collect, self).__init__(terminal=True)
-        self.items = []
-    
-    def __call__(self, item):
-        self.items.append(item)
-    
+        super(Collect, self).__init__()
+        self._retainer = []
+
     def __iter__(self):
-        return iter(self.items)
+        try:
+            while True:
+                self._retainer.append(next(self.source))
+        except StopIteration:
+            self._retainer = iter(self._retainer)
+            return self
+
+    def __next__(self):
+        return next(self._retainer)
+
+
+class Print(Operator):
+
+    def __init__(self, prefix=None, suffix=None):
+        super(Print, self).__init__()
+        self.prefix = prefix
+        self.suffix = suffix
+    
+    def __next__(self):
+        item = next(self.source)
+        if self.prefix is not None:
+            print(self.prefix, end='')
+        print(item, end='')
+        if self.suffix is not None:
+            print(self.suffix, end='')
+        print()
+        return item
 
 
 class Head(Operator):
 
     def __init__(self, count=10):
-        super(Head, self).__init__(terminal=True)
+        super(Head, self).__init__()
         if not isinstance(count, int):
-            raise StreamError('Head operator requires an integer count')
-        self.count = count
-        self.items = []
+            raise ValueError('count must be an integer type')
+        self.count = max(0, count)
 
-    def __call__(self, item):
-        if len(self.items) >= self.count:
-            return StreamConstants.EOS
-        self.items.append(item)
-    
-    def __iter__(self):
-        return iter(self.items)
+    def __next__(self):
+        if self.count <= 0:
+            raise StopIteration()
+        self.count -= 1
+        return next(self.source)
 
 
 class Tail(Operator):
 
     def __init__(self, count=10):
-        super(Tail, self).__init__(terminal=True)
+        super(Tail, self).__init__()
         if not isinstance(count, int):
-            raise StreamError('Tail operator requires an integer count')
-        self.count = count
-        self.block_old = []
-        self.block_new = []
+            raise ValueError('count must be an integer type')
+        self.count = max(0, count)
+        self._buffer = []
 
-    def __call__(self, item):
-        if len(self.block_new) >= self.count:
-            self.block_old = self.block_new
-            self.block_new = []
-        self.block_new.append(item)
-    
     def __iter__(self):
-        fused = self.block_old + self.block_new
-        limit = min(len(fused), self.count)
-        return iter(fused[-limit:])
+        try:
+            while True:
+                self._buffer.append(next(self.source))
+                if len(self._buffer) >= (2 * self.count):
+                    self._buffer = self._buffer[-self.count:]
+        except StopIteration:
+            size = min(self.count, len(self._buffer))
+            self._buffer = iter(self._buffer[-size:])
+            return self
 
+    def __next__(self):
+        return next(self._buffer)
 
-class FlatMap(Operator):
-
-    def __init__(self, mapping):
-        super(FlatMap, self).__init__(terminal=True)
-        if not callable(mapping):
-            raise StreamError('FlatMap operator requires a callable function returning Iterable')
-        self.mapping = mapping
-        self.items = []
-    
-    def __call__(self, item):
-        self.items.extend(self.mapping(item))
-    
-    def __iter__(self):
-        return iter(self.items)
-
-
-class Sorted(Operator):
-
-    def __init__(self, key=None, reverse=False):
-        super(Sorted, self).__init__(terminal=True)
-        self.key = key
-        self.reverse = reverse
-        self.items = []
-
-    def __call__(self, item):
-        self.items.append(item)
-    
-    def __iter__(self):
-        return iter(sorted(self.items, key=self.key, reverse=self.reverse))
-
-
-# functional operators
-class SideEffect(Operator):
-
-    def __init__(self, function):
-        super(SideEffect, self).__init__()
-        if not callable(function):
-            raise StreamError('SideEffect operator requires function')
-        self.function = function
-    
-    def __call__(self, item):
-        self.function(item)
-        return item
-
-
-class Print(SideEffect):
-
-    @staticmethod
-    def create_function(prefix, suffix):
-        def function(item):
-            if prefix:
-                print(prefix, end='')
-            print(item, end='')
-            if suffix:
-                print(suffix, end='')
-            print()
-        return function
-
-    def __init__(self, prefix=None, suffix=None):
-        super(Print, self).__init__(Print.create_function(prefix, suffix))
-    
 
 class Filter(Operator):
 
     def __init__(self, predicate):
         super(Filter, self).__init__()
         if not callable(predicate):
-            raise StreamError('Filter operator requires a callable predicate')
+            raise ValueError('predicate function must be callable returning bool')
         self.predicate = predicate
-    
-    def __call__(self, item):
-        if not self.predicate(item):
-            return StreamConstants.REMOVE
+
+    def __next__(self):
+        item = next(self.source)
+        while not self.predicate(item):
+            item = next(self.source)
         return item
+
+
+class Sorted(Operator):
+
+    def __init__(self, key=None, reverse=False):
+        super(Sorted, self).__init__()
+        self.key = key
+        self.reverse = reverse
+        self._sorted = self.source
+
+    def __iter__(self):
+        self._sorted = iter(sorted(
+            self.source, 
+            key=self.key, 
+            reverse=self.reverse
+        ))
+        return self
+
+    def __next__(self):
+        return next(self._sorted)
 
 
 class Map(Operator):
 
-    def __init__(self, mapping):
+    def __init__(self, func):
         super(Map, self).__init__()
-        if not callable(mapping):
-            raise StreamError('Map operator requires a callable function')
-        self.mapping = mapping
+        if not callable(func):
+            raise ValueError('mapping function must be callable')
+        self.func = func
 
-    def __call__(self, item):
-        return self.mapping(item)
+    def __next__(self):
+        return self.func(next(self.source))
+
+
+class FlatMap(Operator):
+
+    def __init__(self, func):
+        super(FlatMap, self).__init__()
+        if not callable(func):
+            raise ValueError('mapping function must be callable returning iterable')
+        self.func = func
+        self._flat = iter(())
+
+    def __next__(self):
+        while True:
+            try:
+                return next(self._flat)
+            except StopIteration:
+                self._flat = iter(self.func(next(self.source)))
 
 
 class KeyMap(Operator):
 
-    def __init__(self, dictionary, graceful=True):
+    def __init__(self, mapping, graceful=True):
         super(KeyMap, self).__init__()
-        if not isinstance(dictionary, Mapping):
-            raise StreamError('KeyMap operator requires a Mapping object')
-        self.dictionary = dictionary
+        if not isinstance(mapping, Mapping):
+            raise ValueError('mapping object must be of Mapping type')
         self.graceful = graceful
+        self.mapping = mapping
     
-    def __call__(self, item):
-        if self.graceful and item not in self.dictionary:
-            return StreamConstants.REMOVE
-        return self.dictionary[item]
+    def __next__(self):
+        item = next(self.source)
+        if self.graceful:
+            while item not in self.mapping:
+                item = next(self.source)
+        return self.mapping[item]
 
 
-# stream implementations
-class Stream:
+def stream(iterable, operators):
+    # defaults
+    if not isinstance(iterable, Iterable):
+        raise ValueError('iterable must be iterable')
+    if not isinstance(operators, Sequence):
+        raise ValueError('operators must be a sequence of Operator types')
 
-    def __init__(self, 
-        target=None, 
-        autohint=True,
-        objectify=False, 
-    ):
-        if autohint and (
-            isinstance(target, str)
-        ):
-            objectify = True
-        
-        if objectify or not isinstance(target, Iterable):
-            self.target = iter([ target ])
-        else:
-            self.target = iter(target)
+    # validate operators
+    invalid = list(filter(lambda x: not isinstance(x, Operator), operators))
+    if len(invalid) > 0:
+        raise ValueError('invalid operator types:', ', '.join(invalid))
+    
+    # push iterable into operator sequence as source
+    operators.insert(0, iterable)
+    
+    # link operators
+    for i in range(len(operators)-1):
+        source = operators[i]
+        dest = operators[i+1]
+        dest.source = source
 
-    def apply(self, *ops):
-        chains = OperatorChain.parse_oplist(ops)
-        for chain in chains:
-            for item in self.target:
-                for func in chain.functions:
-                    item = func(item)
-                    if item is StreamConstants.REMOVE:
-                        break
-                if item is StreamConstants.REMOVE:
-                    continue
-                if chain.terminal(item) is StreamConstants.EOS:
-                    break
-            self.target = iter(chain.terminal)
-        return self.target
+    return operators[-1]
+
+
+def sideeffect(iterable, operators):
+    """
+    See `udax.fn.stream()`
+    """
+    for _ in stream(iterable, operators):
+        pass
